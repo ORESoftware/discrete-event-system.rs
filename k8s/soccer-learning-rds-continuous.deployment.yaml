@@ -270,13 +270,18 @@ spec:
               value: /dev/null
             - name: SOCCER_LEARNED_PARAMS_PATH
               value: /dev/null
+          # Memory limit MUST stay below the node RAM (~123Gi) so a leaking learner
+          # OOM-kills the POD (it restarts + resumes from Postgres) instead of OOMing
+          # the whole NODE (which wedges it: load 240, API server down). The learner
+          # has unbounded in-memory growth (Q-tables / neural replay / policy) that ate
+          # 122GB; cap at 64Gi to protect the node. Real fix is bounding that in code.
           resources:
             requests:
-              cpu: "4"
-              memory: 32Gi
+              cpu: "2"
+              memory: 16Gi
             limits:
-              cpu: "10"
-              memory: 128Gi
+              cpu: "8"
+              memory: 64Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

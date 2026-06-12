@@ -113,8 +113,11 @@
     clippy::while_let_loop
 )]
 
+pub mod build_info;
 pub mod des;
 pub mod prelude;
+
+pub use build_info::{build_info, BuildInfo};
 
 pub use des::{
     acausal, authoring, decision, equation, fel, hybrid, model, operations_research, plugin,

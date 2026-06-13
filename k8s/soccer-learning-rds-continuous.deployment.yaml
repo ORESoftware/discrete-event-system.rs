@@ -47,10 +47,20 @@ spec:
               export PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
               run_prefix="${SOCCER_RUN_ID_PREFIX:-codex-soccer-learning-continuous}"
-              source_repo="${SOCCER_SOURCE_REPO:-https://github.com/ORESoftware/discrete-event-system.rs.git}"
-              source_ref="${SOCCER_SOURCE_REF:-main}"
-              work_base="/tmp/${run_prefix}-src"
-              work="${work_base}"
+              # `main_soccer_learning_run` was EXTRACTED out of discrete-event-system.rs
+              # into the soccer_engine crate (soccer-sim-game-engine.rs), so the learner
+              # builds from the SOCCER repo. soccer_engine's `des_engine = { path =
+              # "../discrete-event-system.rs" }` requires the DES repo checked out as a
+              # SIBLING, so we clone both into a common parent dir (same adjacency the
+              # dd-des-rs build uses).
+              soccer_repo="${SOCCER_SOURCE_REPO:-https://github.com/ORESoftware/soccer-sim-game-engine.rs.git}"
+              soccer_ref="${SOCCER_SOURCE_REF:-main}"
+              des_repo="${SOCCER_DES_REPO:-https://github.com/ORESoftware/discrete-event-system.rs.git}"
+              des_ref="${SOCCER_DES_REF:-main}"
+              parent="/tmp/${run_prefix}-src"
+              soccer_dir="${parent}/soccer-sim-game-engine.rs"
+              des_dir="${parent}/discrete-event-system.rs"
+              work="${soccer_dir}"
               target="/tmp/${run_prefix}-target"
               ready_file="/tmp/${run_prefix}-ready"
               export CARGO_TARGET_DIR="${target}"
@@ -88,24 +98,30 @@ spec:
               echo "completed_batch_games=${SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES}"
               echo "flush_before_new_sim=${SOCCER_POSTGRES_FLUSH_POLICY_VERSIONS_BEFORE_NEW_SIM}"
               echo "refresh_with_resume=${SOCCER_POSTGRES_REFRESH_WITH_RESUME_ARTIFACT}"
-              echo "source_ref=${source_ref}"
+              echo "soccer_ref=${soccer_ref} des_ref=${des_ref}"
 
-              if [ -d "${work}/.git" ]; then
-                echo "source_checkout_mode=fetch work=${work}"
-                git -C "${work}" fetch --depth 1 origin "${source_ref}"
-                git -C "${work}" checkout --force FETCH_HEAD
-              else
-                if [ -e "${work}" ]; then
-                  work="${work_base}-$(date -u +%Y%m%dT%H%M%SZ)"
-                  echo "source_checkout_mode=clone-after-existing-path work=${work}"
+              # Clone (or refresh) a repo into a fixed dir; --force checkout so a
+              # re-run tracks the latest tip without stale-worktree errors.
+              checkout_repo() {
+                dir="$1"; repo="$2"; ref="$3"
+                if [ -d "${dir}/.git" ]; then
+                  echo "source_checkout_mode=fetch dir=${dir}"
+                  git -C "${dir}" fetch --depth 1 origin "${ref}"
+                  git -C "${dir}" checkout --force FETCH_HEAD
                 else
-                  echo "source_checkout_mode=clone work=${work}"
+                  echo "source_checkout_mode=clone dir=${dir}"
+                  rm -rf "${dir}"
+                  git clone --depth 1 --branch "${ref}" "${repo}" "${dir}"
                 fi
-                git clone --depth 1 --branch "${source_ref}" "${source_repo}" "${work}"
-              fi
-              cd "${work}"
+              }
+
+              mkdir -p "${parent}"
+              # DES first (soccer_engine depends on it as a sibling path dependency).
+              checkout_repo "${des_dir}" "${des_repo}" "${des_ref}"
+              checkout_repo "${soccer_dir}" "${soccer_repo}" "${soccer_ref}"
+              cd "${soccer_dir}"
               actual_commit="$(git rev-parse HEAD)"
-              echo "source_commit_actual=${actual_commit}"
+              echo "source_commit_actual=${actual_commit} des_commit=$(git -C "${des_dir}" rev-parse HEAD)"
               export SOCCER_SOURCE_COMMIT="${actual_commit}"
 
               /usr/local/cargo/bin/cargo build --release --bin main_soccer_learning_run
@@ -143,9 +159,16 @@ spec:
               value: "5"
             - name: RUST_BACKTRACE
               value: "1"
+            # main_soccer_learning_run now lives in the soccer_engine repo (extracted
+            # out of discrete-event-system.rs). DES is still cloned as a sibling for
+            # soccer_engine's `des_engine` path dependency (SOCCER_DES_REPO/REF).
             - name: SOCCER_SOURCE_REPO
-              value: https://github.com/ORESoftware/discrete-event-system.rs.git
+              value: https://github.com/ORESoftware/soccer-sim-game-engine.rs.git
             - name: SOCCER_SOURCE_REF
+              value: main
+            - name: SOCCER_DES_REPO
+              value: https://github.com/ORESoftware/discrete-event-system.rs.git
+            - name: SOCCER_DES_REF
               value: main
             - name: SOCCER_DATABASE_URL
               valueFrom:

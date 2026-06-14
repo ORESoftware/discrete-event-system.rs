@@ -47,6 +47,7 @@ pub mod double_integrator_lqr;
 pub mod feedback_linearization;
 pub mod kalman_filter;
 pub mod mpc_double_integrator;
+pub mod mpc_point_mass;
 pub mod mrac;
 pub mod pomdp;
 pub mod pontryagin_bang_bang;

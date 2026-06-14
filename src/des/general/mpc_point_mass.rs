@@ -68,6 +68,39 @@ pub struct PlanarState {
     pub vel: [f64; 2],
 }
 
+/// A moving soft keep-out region the controller should avoid — the generic
+/// mechanism for making the plan aware of *other agents* (their position **and**
+/// velocity). The obstacle's centre is propagated along its `velocity` over the
+/// horizon (constant-velocity prediction), so the plan bends around where a mover
+/// *will be*, not just where it is now. The penalty is soft (a quadratic well that
+/// is zero outside `radius`), so it shapes the trajectory without ever making the
+/// QP infeasible — a controller boxed in on all sides still returns a best-effort
+/// control rather than failing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanarObstacle {
+    /// Obstacle centre at horizon step 0.
+    pub center: [f64; 2],
+    /// Predicted constant velocity of the obstacle (units/second).
+    pub velocity: [f64; 2],
+    /// Keep-out radius: the penalty is zero at/beyond this distance and grows
+    /// quadratically as the plan pushes inside it.
+    pub radius: f64,
+    /// Penalty weight (cost per yard² of incursion). Larger = harder avoidance.
+    pub weight: f64,
+}
+
+impl PlanarObstacle {
+    /// A stationary keep-out at `center`.
+    pub fn fixed(center: [f64; 2], radius: f64, weight: f64) -> Self {
+        PlanarObstacle {
+            center,
+            velocity: [0.0, 0.0],
+            radius,
+            weight,
+        }
+    }
+}
+
 /// Configuration for [`PlanarPointMassMpc`]. All weights are non-negative; `r`,
 /// `a_max`, `dt` and the horizon must be strictly positive.
 #[derive(Clone, Copy, Debug)]
@@ -90,6 +123,14 @@ pub struct PlanarMpcConfig {
     pub a_max: f64,
     /// Projected-gradient iterations per solve.
     pub iters: usize,
+    /// Per-step multiplicative decay applied to obstacle penalty weights as the
+    /// horizon extends: the effective weight at step `i` is `weight · decay^i`.
+    /// `1.0` (default) trusts every predicted obstacle position equally — fine for
+    /// a short horizon. For a multi-second horizon set it `< 1` so the plan trusts
+    /// near-term (reliable) obstacle predictions and discounts the far-future ones
+    /// (constant-velocity extrapolation is fiction several seconds out), instead of
+    /// swerving around where an opponent will *never actually* be. Must be in (0, 1].
+    pub obstacle_decay_per_step: f64,
 }
 
 impl Default for PlanarMpcConfig {
@@ -106,6 +147,7 @@ impl Default for PlanarMpcConfig {
             r: 0.1,
             a_max: 6.0,
             iters: 60,
+            obstacle_decay_per_step: 1.0,
         }
     }
 }
@@ -137,6 +179,13 @@ impl PlanarPointMassMpc {
         Preconditions::positive(cls, "r", cfg.r)?;
         Preconditions::positive(cls, "a_max", cfg.a_max)?;
         Preconditions::integer_in_range(cls, "iters", cfg.iters as f64, 1.0, 100_000.0)?;
+        Preconditions::in_range(
+            cls,
+            "obstacle_decay_per_step",
+            cfg.obstacle_decay_per_step,
+            f64::MIN_POSITIVE,
+            1.0,
+        )?;
         Ok(PlanarPointMassMpc {
             b_p: 0.5 * cfg.dt * cfg.dt,
             b_v: cfg.dt,
@@ -177,14 +226,62 @@ impl PlanarPointMassMpc {
         refs[idx]
     }
 
+    /// Soft keep-out penalty (and its position gradient) for one predicted state
+    /// `p` at horizon step `i`. Each obstacle is propagated to step `i` by its
+    /// velocity. The well is `weight · (radius − dist)²` inside `radius`, zero
+    /// outside — smooth at the boundary, with a finite gradient everywhere (a
+    /// degenerate exactly-on-centre case pushes along +x to avoid a 0/0).
+    fn obstacle_cost_grad(&self, p: [f64; 2], i: usize, obstacles: &[PlanarObstacle]) -> (f64, [f64; 2]) {
+        let mut cost = 0.0;
+        let mut grad = [0.0, 0.0];
+        let t = self.cfg.dt * i as f64;
+        // Trust near-term obstacle predictions, discount far-future ones (their
+        // constant-velocity extrapolation is unreliable). `decay == 1` ⇒ no change.
+        let decay = if self.cfg.obstacle_decay_per_step >= 1.0 {
+            1.0
+        } else {
+            self.cfg.obstacle_decay_per_step.powi(i as i32)
+        };
+        for ob in obstacles {
+            let weight = ob.weight * decay;
+            if !(weight > 0.0) || !(ob.radius > 0.0) {
+                continue;
+            }
+            let cx = ob.center[0] + ob.velocity[0] * t;
+            let cy = ob.center[1] + ob.velocity[1] * t;
+            let dx = p[0] - cx;
+            let dy = p[1] - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist >= ob.radius {
+                continue;
+            }
+            let incursion = ob.radius - dist;
+            cost += weight * incursion * incursion;
+            // d cost/d p = 2·w·(radius−dist)·(−d dist/d p) = −2·w·incursion·(p−c)/dist.
+            // Pushes the plan radially OUTWARD (away from the obstacle centre).
+            if dist > 1e-9 {
+                let g = -2.0 * weight * incursion / dist;
+                grad[0] += g * dx;
+                grad[1] += g * dy;
+            } else {
+                // On the centre: push out along +x (arbitrary but finite).
+                grad[0] += -2.0 * weight * ob.radius;
+            }
+        }
+        (cost, grad)
+    }
+
     /// Forward rollout + adjoint backward sweep: returns `(cost, gradient)` of the
-    /// horizon objective with respect to the control sequence. The two axes are
-    /// independent in both dynamics and cost (they couple only in the disk
-    /// projection), so the sweep runs per axis.
+    /// horizon objective with respect to the control sequence. Reference tracking
+    /// and double-integrator dynamics are axis-separable; the soft obstacle field
+    /// couples the axes (distance is 2-D), so the forward rollout is done once in
+    /// 2-D, obstacle penalties + gradients are accumulated per step, and the
+    /// adjoint sweep runs per axis using the shared per-step position gradient.
     fn cost_and_grad(
         &self,
         state: PlanarState,
         refs: &[PlanarReference],
+        obstacles: &[PlanarObstacle],
         useq: &[[f64; 2]],
     ) -> (f64, Vec<[f64; 2]>) {
         let n = self.cfg.horizon;
@@ -197,42 +294,63 @@ impl PlanarPointMassMpc {
         );
         let dt = self.cfg.dt;
 
-        let mut cost = 0.0;
-        let mut grad = vec![[0.0; 2]; n];
-
-        // Per-axis rollout + sweep.
-        for d in 0..2 {
-            // Forward rollout of (pos, vel) on this axis.
-            let mut ps = vec![0.0_f64; n + 1];
-            let mut vs = vec![0.0_f64; n + 1];
-            ps[0] = state.pos[d];
-            vs[0] = state.vel[d];
-            for i in 0..n {
-                let rf = Self::reference_at(refs, i);
-                let dp = ps[i] - rf.pos[d];
-                let dv = vs[i] - rf.vel[d];
-                let u = useq[i][d];
-                cost += q_pos * dp * dp + q_vel * dv * dv + r * u * u;
-                ps[i + 1] = ps[i] + dt * vs[i] + self.b_p * u;
-                vs[i + 1] = vs[i] + self.b_v * u;
+        // Single 2-D forward rollout.
+        let mut ps = vec![[0.0_f64; 2]; n + 1];
+        let mut vs = vec![[0.0_f64; 2]; n + 1];
+        ps[0] = state.pos;
+        vs[0] = state.vel;
+        for i in 0..n {
+            for d in 0..2 {
+                ps[i + 1][d] = ps[i][d] + dt * vs[i][d] + self.b_p * useq[i][d];
+                vs[i + 1][d] = vs[i][d] + self.b_v * useq[i][d];
             }
-            let rf_n = Self::reference_at(refs, n);
-            let dpn = ps[n] - rf_n.pos[d];
-            let dvn = vs[n] - rf_n.vel[d];
-            cost += qf_pos * dpn * dpn + qf_vel * dvn * dvn;
+        }
 
-            // Adjoint backward sweep. λ = (λ_p, λ_v).
-            //   λ_N   = ∂terminal/∂x_N
-            //   λ_i   = ∂stage_i/∂x_i + Aᵀ λ_{i+1}
-            //   grad_i = 2·R·u_i + Bᵀ λ_{i+1}
-            // with A = [[1, dt], [0, 1]], B = [b_p, b_v].
-            let mut lam_p = 2.0 * qf_pos * dpn;
+        // Per-step position-gradient of all *state*-dependent costs (tracking +
+        // obstacles), plus the running cost. `pos_grad[i]` = ∂(stage_i)/∂p_i.
+        let mut cost = 0.0;
+        let mut pos_grad = vec![[0.0_f64; 2]; n + 1];
+        for i in 0..=n {
+            let rf = Self::reference_at(refs, i);
+            let (wq_pos, wq_vel) = if i == n {
+                (qf_pos, qf_vel)
+            } else {
+                (q_pos, q_vel)
+            };
+            for d in 0..2 {
+                let dp = ps[i][d] - rf.pos[d];
+                let dv = vs[i][d] - rf.vel[d];
+                cost += wq_pos * dp * dp + wq_vel * dv * dv;
+                pos_grad[i][d] += 2.0 * wq_pos * dp;
+                // velocity-tracking gradient is handled in the adjoint via lam_v seed
+                // for the terminal and via the per-step ∂/∂v below.
+            }
+            if i < n {
+                let u = useq[i];
+                cost += r * (u[0] * u[0] + u[1] * u[1]);
+            }
+            if !obstacles.is_empty() {
+                let (oc, og) = self.obstacle_cost_grad(ps[i], i, obstacles);
+                cost += oc;
+                pos_grad[i][0] += og[0];
+                pos_grad[i][1] += og[1];
+            }
+        }
+
+        // Per-axis adjoint backward sweep using the shared per-step position
+        // gradient. λ = (λ_p, λ_v), A = [[1, dt],[0,1]], B = [b_p, b_v].
+        let mut grad = vec![[0.0; 2]; n];
+        for d in 0..2 {
+            let rf_n = Self::reference_at(refs, n);
+            let dvn = vs[n][d] - rf_n.vel[d];
+            let mut lam_p = pos_grad[n][d];
             let mut lam_v = 2.0 * qf_vel * dvn;
             for i in (0..n).rev() {
                 grad[i][d] = 2.0 * r * useq[i][d] + self.b_p * lam_p + self.b_v * lam_v;
                 let rf = Self::reference_at(refs, i);
-                let lam_p_new = 2.0 * q_pos * (ps[i] - rf.pos[d]) + lam_p;
-                let lam_v_new = 2.0 * q_vel * (vs[i] - rf.vel[d]) + dt * lam_p + lam_v;
+                let dv = vs[i][d] - rf.vel[d];
+                let lam_p_new = pos_grad[i][d] + lam_p;
+                let lam_v_new = 2.0 * q_vel * dv + dt * lam_p + lam_v;
                 lam_p = lam_p_new;
                 lam_v = lam_v_new;
             }
@@ -247,7 +365,12 @@ impl PlanarPointMassMpc {
     /// is always finite and feasible. A non-finite cost (only reachable via a
     /// non-finite reference, which the caller already guards) aborts the descent
     /// early with the feasible warm start rather than iterating on garbage.
-    fn solve(&self, state: PlanarState, refs: &[PlanarReference]) -> Vec<[f64; 2]> {
+    fn solve(
+        &self,
+        state: PlanarState,
+        refs: &[PlanarReference],
+        obstacles: &[PlanarObstacle],
+    ) -> Vec<[f64; 2]> {
         let n = self.cfg.horizon;
         let mut useq = self.warm.clone();
         // Ensure the warm start itself is feasible (and finite).
@@ -257,7 +380,7 @@ impl PlanarPointMassMpc {
         let mut alpha = 0.05_f64;
         let mut last_cost = f64::INFINITY;
         for _ in 0..self.cfg.iters {
-            let (cost, grad) = self.cost_and_grad(state, refs, &useq);
+            let (cost, grad) = self.cost_and_grad(state, refs, obstacles, &useq);
             if !cost.is_finite() {
                 break;
             }
@@ -297,6 +420,20 @@ impl PlanarPointMassMpc {
     /// untouched — a corrupt measurement can never poison the controller or emit a
     /// NaN/∞ control.
     pub fn control(&mut self, state: PlanarState, refs: &[PlanarReference]) -> [f64; 2] {
+        self.control_with_obstacles(state, refs, &[])
+    }
+
+    /// Like [`Self::control`], but the plan also avoids a set of moving soft
+    /// obstacles — the field-aware path that lets an agent's trajectory bend
+    /// around where *other agents* (opponents, teammates, the ball) are predicted
+    /// to be over the horizon. Non-finite obstacles are skipped; obstacles never
+    /// make the solve fail (the penalty is soft).
+    pub fn control_with_obstacles(
+        &mut self,
+        state: PlanarState,
+        refs: &[PlanarReference],
+        obstacles: &[PlanarObstacle],
+    ) -> [f64; 2] {
         if refs.is_empty() {
             // Degenerate: no target — coast (no acceleration).
             return [0.0, 0.0];
@@ -309,7 +446,18 @@ impl PlanarPointMassMpc {
         {
             return [0.0, 0.0];
         }
-        let useq = self.solve(state, refs);
+        // Drop any non-finite obstacle so a bad measurement can't poison the plan.
+        let clean: Vec<PlanarObstacle> = obstacles
+            .iter()
+            .copied()
+            .filter(|o| {
+                Self::finite2(o.center)
+                    && Self::finite2(o.velocity)
+                    && o.radius.is_finite()
+                    && o.weight.is_finite()
+            })
+            .collect();
+        let useq = self.solve(state, refs, &clean);
         let first = useq[0];
         // Shift the warm start: drop the applied control, append a zero.
         let n = self.cfg.horizon;
@@ -500,6 +648,131 @@ mod tests {
             vel: [1.0, 0.0],
         };
         assert_eq!(mpc.control(state, &[]), [0.0, 0.0]);
+    }
+
+    fn min_clearance_to(
+        cfg: PlanarMpcConfig,
+        target: PlanarReference,
+        obstacles: &[PlanarObstacle],
+        probe: [f64; 2],
+        steps: usize,
+    ) -> ([f64; 2], f64) {
+        let mut mpc = PlanarPointMassMpc::new(cfg).unwrap();
+        let mut state = PlanarState {
+            pos: [0.0, 0.0],
+            vel: [0.0, 0.0],
+        };
+        let (dt, b_p, b_v) = (cfg.dt, 0.5 * cfg.dt * cfg.dt, cfg.dt);
+        let mut min_clearance = f64::INFINITY;
+        for _ in 0..steps {
+            let a = mpc.control_with_obstacles(state, &[target], obstacles);
+            for d in 0..2 {
+                state.pos[d] = state.pos[d] + dt * state.vel[d] + b_p * a[d];
+                state.vel[d] = state.vel[d] + b_v * a[d];
+            }
+            let clr =
+                ((state.pos[0] - probe[0]).powi(2) + (state.pos[1] - probe[1]).powi(2)).sqrt();
+            min_clearance = min_clearance.min(clr);
+        }
+        (state.pos, min_clearance)
+    }
+
+    #[test]
+    fn obstacle_pushes_path_off_the_straight_line() {
+        // Target straight ahead in +y; a keep-out just off the straight line (as a
+        // real defender would be) makes the controller skirt it. We compare the
+        // closest approach WITH the obstacle against the obstacle-free run: the
+        // soft field must measurably increase the clearance while still arriving.
+        let cfg = PlanarMpcConfig {
+            a_max: 6.0,
+            ..PlanarMpcConfig::default()
+        };
+        let target = PlanarReference::arrive([0.0, 20.0]);
+        let probe = [0.6, 10.0];
+        let obstacles = [PlanarObstacle::fixed(probe, 3.5, 120.0)];
+
+        let (_, clearance_free) = min_clearance_to(cfg, target, &[], probe, 110);
+        let (end, clearance_obs) = min_clearance_to(cfg, target, &obstacles, probe, 110);
+
+        let dp = ((end[0]).powi(2) + (end[1] - 20.0).powi(2)).sqrt();
+        assert!(dp < 1.5, "should still reach target, dist={dp}, end={end:?}");
+        assert!(
+            clearance_obs > clearance_free + 0.5,
+            "obstacle should increase clearance: free={clearance_free}, obs={clearance_obs}"
+        );
+    }
+
+    #[test]
+    fn timing_one_solve_is_well_under_budget() {
+        // Measure the real cost of a warm-started, field-aware solve at the soccer
+        // per-player settings: 45-step (3 s @ 15 Hz) horizon, 21 moving obstacles
+        // with prediction decay, as the tick controller actually runs it. Prints
+        // the per-solve time with --nocapture.
+        let cfg = PlanarMpcConfig {
+            horizon: 45,
+            iters: 90,
+            obstacle_decay_per_step: 0.5_f64.powf((1.0 / 15.0) / 1.5),
+            ..PlanarMpcConfig::default()
+        };
+        let mut mpc = PlanarPointMassMpc::new(cfg).unwrap();
+        let state = PlanarState {
+            pos: [10.0, 10.0],
+            vel: [1.0, 2.0],
+        };
+        let target = PlanarReference::arrive([60.0, 50.0]);
+        let obstacles: Vec<PlanarObstacle> = (0..21)
+            .map(|k| {
+                PlanarObstacle {
+                    center: [5.0 + (k as f64) * 3.0, 8.0 + (k % 5) as f64 * 6.0],
+                    velocity: [0.5, -0.3],
+                    radius: 2.0,
+                    weight: 40.0,
+                }
+            })
+            .collect();
+        // Warm up.
+        for _ in 0..5 {
+            let _ = mpc.control_with_obstacles(state, &[target], &obstacles);
+        }
+        let iters = 2000;
+        let start = std::time::Instant::now();
+        let mut acc = 0.0;
+        for _ in 0..iters {
+            let a = mpc.control_with_obstacles(state, &[target], &obstacles);
+            acc += a[0];
+        }
+        let per = start.elapsed().as_secs_f64() / iters as f64;
+        println!(
+            "MPC field-aware solve: {:.1} µs/solve (horizon {}, 21 obstacles); acc={acc:.3}",
+            per * 1e6,
+            cfg.horizon
+        );
+        // Generously bounded so it is not flaky, but proves we are far under the
+        // ~1-2 ms/player a 10-20 ms whole-tick budget would allow.
+        assert!(
+            per < 2.0e-3,
+            "single field-aware solve took {:.3} ms — too slow",
+            per * 1e3
+        );
+    }
+
+    #[test]
+    fn obstacle_avoidance_is_inert_with_no_obstacles() {
+        // control_with_obstacles(&[]) must match control() exactly.
+        let cfg = PlanarMpcConfig::default();
+        let state = PlanarState {
+            pos: [1.0, 1.0],
+            vel: [0.5, 0.0],
+        };
+        let target = PlanarReference::arrive([6.0, 4.0]);
+        let mut a = PlanarPointMassMpc::new(cfg).unwrap();
+        let mut b = PlanarPointMassMpc::new(cfg).unwrap();
+        for _ in 0..10 {
+            assert_eq!(
+                a.control(state, &[target]),
+                b.control_with_obstacles(state, &[target], &[])
+            );
+        }
     }
 
     #[test]

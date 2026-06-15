@@ -142,8 +142,14 @@ pub mod checkpoint_precedence;
 // declared graph topology and validated by a `DeterministicScheduler`, instead
 // of resting on an implicit hand-ordered node list. Additive (see its README).
 pub mod fibonacci_scheduled;
+
+// Household bathroom occupancy: a blocking-loss discrete-event Monte-Carlo
+// (finite-source loss system) with a self-contained HTML animation.
+pub mod bathrooms;
+
 pub mod main;
 pub mod main_backpropagation;
+pub mod main_bathrooms;
 pub mod main_build_site;
 pub mod main_calculus;
 pub mod main_calculus_of_variations_anim;

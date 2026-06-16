@@ -144,12 +144,16 @@ pub mod checkpoint_precedence;
 pub mod fibonacci_scheduled;
 
 // Household bathroom occupancy: a blocking-loss discrete-event Monte-Carlo
-// (finite-source loss system) with a self-contained HTML animation.
+// (finite-source loss system) with a self-contained HTML animation. The
+// `two_bathrooms` variant re-expresses the same model on the engine's reusable
+// entity (MovingEntity/StationaryEntity) + animation (visual-block) frameworks.
 pub mod bathrooms;
+pub mod two_bathrooms;
 
 pub mod main;
 pub mod main_backpropagation;
 pub mod main_bathrooms;
+pub mod main_two_bathrooms;
 pub mod main_build_site;
 pub mod main_calculus;
 pub mod main_calculus_of_variations_anim;

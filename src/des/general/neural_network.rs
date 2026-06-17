@@ -433,6 +433,20 @@ impl FeedForwardNetwork {
         if learning_rate < 0.0 {
             panic!("learningRate must be non-negative, got {learning_rate}");
         }
+        // A non-finite input or target is a runtime data hazard, not a structural
+        // bug: drop the step (like a divergent gradient) instead of panicking in
+        // `forward`, so a single NaN feature can't crash a detached training
+        // worker and silently halt learning. A *dimension* mismatch is still a
+        // programmer error and panics below via `assert_vector`.
+        if !vector_is_finite(input, self.input_dim) || !vector_is_finite(target, self.output_dim) {
+            if input.len() == self.input_dim && target.len() == self.output_dim {
+                return ClippedTrainResult {
+                    loss: f64::NAN,
+                    applied: false,
+                    clipped: false,
+                };
+            }
+        }
         self.assert_vector(input, self.input_dim, "input");
         self.assert_vector(target, self.output_dim, "target");
 
@@ -584,15 +598,20 @@ impl FeedForwardNetwork {
             Some(ActivationName::Linear),
             "train_policy_gradient_sample requires a Linear output layer"
         );
-        self.assert_vector(input, self.input_dim, "input");
-        if !advantage.is_finite() {
-            // Nothing to learn from a non-finite advantage; skip cleanly.
-            return ClippedTrainResult {
-                loss: 0.0,
-                applied: false,
-                clipped: false,
-            };
+        // A non-finite advantage or input is nothing to learn from — skip the
+        // step cleanly rather than panicking in `forward`, so a degenerate
+        // sample can't crash the actor's (possibly detached) trainer. A
+        // dimension mismatch is a structural bug and still panics below.
+        if !advantage.is_finite() || !vector_is_finite(input, self.input_dim) {
+            if input.len() == self.input_dim {
+                return ClippedTrainResult {
+                    loss: 0.0,
+                    applied: false,
+                    clipped: false,
+                };
+            }
         }
+        self.assert_vector(input, self.input_dim, "input");
 
         let trace = self.forward(input);
         let logits = &trace.activations[self.layers.len()];
@@ -644,6 +663,13 @@ impl FeedForwardNetwork {
         }
         total / (count.max(1) as f64)
     }
+}
+
+/// Whether `v` has the expected length and every component is finite. Used by
+/// the divergence-guarded trainers to drop a step on non-finite **data** (a
+/// runtime hazard) rather than panic inside [`FeedForwardNetwork::forward`].
+fn vector_is_finite(v: &[f64], dim: usize) -> bool {
+    v.len() == dim && v.iter().all(|x| x.is_finite())
 }
 
 fn activate(name: ActivationName, z: f64) -> f64 {
@@ -1573,6 +1599,59 @@ mod tests {
                 .all(|v| v.is_finite()),
             "non-finite gradient must not poison the weights"
         );
+    }
+
+    #[test]
+    fn clipped_step_drops_non_finite_input_or_target_without_panicking() {
+        // A NaN/Inf in the data (not the weights) must drop the step rather than
+        // panic in `forward` — otherwise a single bad feature crashes a detached
+        // training worker and silently halts learning.
+        let mut net = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.3, -0.2]],
+            biases: vec![0.1],
+            activation: ActivationName::Linear,
+        }]);
+        let before = net.layers[0].weights[0].clone();
+
+        let nan_input = net.train_sample_clipped(&[f64::NAN, 1.0], &[0.5], 0.1, 4.0);
+        assert!(!nan_input.applied, "NaN input must drop the step");
+        let inf_target = net.train_sample_clipped(&[1.0, 1.0], &[f64::INFINITY], 0.1, 4.0);
+        assert!(!inf_target.applied, "Inf target must drop the step");
+
+        assert_eq!(
+            net.layers[0].weights[0], before,
+            "dropped steps must leave weights untouched"
+        );
+    }
+
+    #[test]
+    fn policy_gradient_drops_non_finite_input_without_panicking() {
+        let mut policy = FeedForwardNetwork::random(
+            &RandomNetworkSpec {
+                input_dim: 2,
+                hidden_layers: vec![3],
+                output_dim: 3,
+                hidden_activation: ActivationName::Tanh,
+                output_activation: ActivationName::Linear,
+                weight_scale: None,
+            },
+            &mut mulberry32(9),
+        );
+        let r = policy.train_policy_gradient_sample(&[f64::NAN, 0.2], 1, 1.0, 0.0, 0.1, 5.0);
+        assert!(!r.applied, "NaN input must drop the policy step");
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match expected")]
+    fn clipped_step_still_panics_on_dimension_mismatch() {
+        // A wrong-length input is a structural/programmer error and must stay
+        // loud — only non-finite *data* is downgraded to a silent dropped step.
+        let mut net = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.3, -0.2]],
+            biases: vec![0.1],
+            activation: ActivationName::Linear,
+        }]);
+        let _ = net.train_sample_clipped(&[1.0, 2.0, 3.0], &[0.5], 0.1, 4.0);
     }
 
     #[test]

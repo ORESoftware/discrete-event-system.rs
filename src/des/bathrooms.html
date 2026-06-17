@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bathroom occupancy — discrete-event Monte-Carlo</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --ink:#e6edf3; --muted:#8b97a7;
+    --line:#283142; --accent:#58a6ff; --green:#3fb950; --amber:#d29922; --red:#f85149;
+    --p0:#3fb950; --p1:#d29922; --p2:#f85149;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  header{padding:18px 22px 6px}
+  h1{margin:0;font-size:21px;letter-spacing:.2px}
+  .sub{color:var(--muted);margin:4px 0 0;max-width:880px}
+  .wrap{display:grid;grid-template-columns:minmax(440px,1.25fr) minmax(360px,1fr);
+    gap:16px;padding:14px 22px 40px}
+  @media(max-width:960px){.wrap{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .card h2{margin:0 0 10px;font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  .scene-wrap{display:flex;flex-direction:column;gap:10px}
+  svg{width:100%;height:auto;display:block}
+  .controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px}
+  button{background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+    border-radius:8px;padding:7px 13px;font-size:13px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  input[type=range]{accent-color:var(--accent)}
+  .clock{font-variant-numeric:tabular-nums;font-weight:600;font-size:16px}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
+    background:var(--panel2);border:1px solid var(--line);font-variant-numeric:tabular-nums}
+  .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:6px}
+  .stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .stat .k{color:var(--muted);font-size:12px}
+  .stat .v{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+  .stat small{color:var(--muted);font-weight:400;font-size:12px}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  thead th{color:var(--muted);font-weight:600;font-size:12px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:6px}
+  .swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:middle}
+  canvas{width:100%;display:block}
+  .note{color:var(--muted);font-size:12.5px;margin-top:8px}
+  code{background:var(--panel2);padding:1px 5px;border-radius:5px;font-size:12px}
+  .badge{font-size:11px;padding:2px 7px;border-radius:6px;border:1px solid var(--line);color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🚻 Bathroom occupancy — a discrete-event Monte-Carlo</h1>
+  <p class="sub" id="subtitle"></p>
+</header>
+
+<div class="wrap">
+  <!-- LEFT: animated house + controls + live readout -->
+  <div class="card scene-wrap">
+    <h2>The house, one sampled run</h2>
+    <div class="controls">
+      <button id="playBtn">⏸ Pause</button>
+      <span class="clock" id="clock">Day 1 · 00:00</span>
+      <span class="pill" id="occPill">occupied: 0 / 2</span>
+      <span style="flex:1"></span>
+      <label class="badge">speed</label>
+      <input type="range" id="speed" min="0.25" max="8" step="0.25" value="2" style="width:130px" />
+      <span class="badge" id="speedLbl">2×</span>
+    </div>
+    <svg id="scene" viewBox="0 0 640 380" aria-label="house scene"></svg>
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--green)"></span>vacant bathroom</span>
+      <span><span class="swatch" style="background:var(--red)"></span>occupied</span>
+      <span><span class="swatch" style="background:var(--amber)"></span>turned away (both busy)</span>
+    </div>
+    <div class="note">
+      Each person heads to a bathroom 3× a day at random times, 20&nbsp;min each. If both
+      bathrooms are busy, the arrival is <b>rejected</b> — no one shares a stall, no one waits.
+      The playhead below scrubs the sampled timeline.
+    </div>
+    <canvas id="gantt" height="150"></canvas>
+  </div>
+
+  <!-- RIGHT: results -->
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div class="card">
+      <h2>How often is a bathroom in use?</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="k">No bathroom</div><div class="v" id="s0">–</div><small>both free</small></div>
+        <div class="stat"><div class="k">One bathroom</div><div class="v" id="s1">–</div><small>exactly one busy</small></div>
+        <div class="stat"><div class="k">Both bathrooms</div><div class="v" id="s2">–</div><small>house at capacity</small></div>
+      </div>
+      <canvas id="bars" height="150"></canvas>
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--accent)"></span>Monte-Carlo (simulated)</span>
+        <span><span class="swatch" style="background:#fff;outline:1px dashed var(--muted)"></span>binomial (theory)</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Simulated vs. closed-form theory</h2>
+      <table id="cmp">
+        <thead><tr><th>Quantity</th><th>Simulated</th><th>Binomial</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="note" id="cmpNote"></div>
+    </div>
+
+    <div class="card">
+      <h2>Monte-Carlo convergence</h2>
+      <canvas id="conv" height="170"></canvas>
+      <div class="note" id="convNote"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DATA = /*__BATH_DATA__*/0;
+(function(){
+  const D = DATA, C = D.config;
+  const fmtPct = x => (100*x).toFixed(1) + '%';
+  const B = C.bathrooms;
+
+  // ---- header / subtitle ------------------------------------------------
+  document.getElementById('subtitle').innerHTML =
+    `${C.people} people · ${C.bathrooms} bathrooms · ${C.visitsPerDay} visits/day · ` +
+    `${C.serviceMin} min each. Time-weighted occupancy from ` +
+    `<b>${C.replications.toLocaleString()}</b> Monte-Carlo replications of ` +
+    `${C.daysPerRep} days (warm-up discarded), checked against the exact ` +
+    `Binomial(${C.people}, ${C.visitsPerDay}·${C.serviceMin}/1440) model.`;
+
+  // ---- headline numbers -------------------------------------------------
+  document.getElementById('s0').textContent = fmtPct(D.sim.p[0]);
+  document.getElementById('s1').textContent = fmtPct(D.sim.p[1]);
+  document.getElementById('s2').textContent = fmtPct(D.sim.p[2] || 0);
+
+  // ---- comparison table -------------------------------------------------
+  const rows = [
+    ['No bathroom occupied',      D.sim.p[0],        D.analytic.p0],
+    ['Exactly one occupied',      D.sim.p[1],        D.analytic.p1],
+    ['Both occupied',             D.sim.p[2]||0,     D.analytic.p2],
+    ['Mean bathrooms in use',     D.sim.mean,        D.analytic.mean, 'num'],
+    ['P(both | at least one)',    cond(D.sim.p),     D.analytic.bothGivenAny],
+    ['Requests turned away',      D.sim.blocked,     null],
+  ];
+  function cond(p){ const any=1-p[0]; return any>0 ? (p[2]||0)/any : 0; }
+  const tb = document.querySelector('#cmp tbody');
+  for(const r of rows){
+    const tr=document.createElement('tr');
+    const sim = r[3]==='num' ? r[1].toFixed(3) : fmtPct(r[1]);
+    const th  = r[2]==null ? '—' : (r[3]==='num' ? r[2].toFixed(3) : fmtPct(r[2]));
+    tr.innerHTML = `<td>${r[0]}</td><td>${sim}</td><td>${th}</td>`;
+    tb.appendChild(tr);
+  }
+  document.getElementById('cmpNote').innerHTML =
+    `Per person, P(in a bathroom at a random instant) = ${C.visitsPerDay}·${C.serviceMin}/1440 ` +
+    `= <code>${(D.analytic.pPerson*100).toFixed(2)}%</code>. With ${C.people} independent people ` +
+    `the count in bathrooms is ~Binomial — one person busy is common, two overlapping is rare.`;
+
+  // ===== Monte-Carlo convergence chart ===================================
+  drawConvergence();
+  function drawConvergence(){
+    const cv=document.getElementById('conv'), ctx=cv.getContext('2d');
+    fitHiDPI(cv); const W=cv.clientWidth, H=cv.clientHeight;
+    const padL=42,padR=10,padT=10,padB=22;
+    const series=D.convergence, n=series.length;
+    const targets=[D.analytic.p0,D.analytic.p1,D.analytic.p2];
+    const colors=['var(--p0)','var(--p1)','var(--p2)'].map(cssVar);
+    const labels=['P(0)','P(1)','P(2)'];
+    const ymax=Math.max(0.4, Math.min(1, Math.max(...series.map(s=>s[0]))*1.1));
+    ctx.clearRect(0,0,W,H);
+    // axes
+    ctx.strokeStyle=cssVar('--line'); ctx.fillStyle=cssVar('--muted'); ctx.font='11px sans-serif';
+    ctx.lineWidth=1;
+    for(let g=0; g<=4; g++){
+      const y=padT+(H-padT-padB)*g/4, v=ymax*(1-g/4);
+      ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();
+      ctx.fillText((v*100).toFixed(0)+'%', 6, y+3);
+    }
+    const X=i=> padL + (W-padL-padR)*(n<=1?0:i/(n-1));
+    const Y=v=> padT + (H-padT-padB)*(1 - v/ymax);
+    // theory guide lines (dashed)
+    ctx.setLineDash([4,4]);
+    for(let k=0;k<3;k++){ ctx.strokeStyle=colors[k]; ctx.globalAlpha=.4;
+      ctx.beginPath();ctx.moveTo(padL,Y(targets[k]));ctx.lineTo(W-padR,Y(targets[k]));ctx.stroke(); }
+    ctx.globalAlpha=1; ctx.setLineDash([]);
+    // running estimates
+    for(let k=0;k<3;k++){
+      ctx.strokeStyle=colors[k]; ctx.lineWidth=2; ctx.beginPath();
+      for(let i=0;i<n;i++){ const x=X(i),y=Y(series[i][k]||0); i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+      ctx.stroke();
+    }
+    // labels at right
+    ctx.font='11px sans-serif';
+    for(let k=0;k<3;k++){ ctx.fillStyle=colors[k];
+      ctx.fillText(labels[k], W-padR-30, Y(series[n-1][k]||0)-4); }
+    document.getElementById('convNote').innerHTML =
+      `Running estimate after each replication settles onto the dashed theoretical lines — ` +
+      `early wobble is the start/stop edge averaging out across runs.`;
+  }
+
+  // ===== probability bars (sim vs theory) ================================
+  drawBars();
+  function drawBars(){
+    const cv=document.getElementById('bars'), ctx=cv.getContext('2d');
+    fitHiDPI(cv); const W=cv.clientWidth,H=cv.clientHeight;
+    const padB=22,padT=8; const groups=[
+      ['none', D.sim.p[0], D.analytic.p0, cssVar('--p0')],
+      ['one',  D.sim.p[1], D.analytic.p1, cssVar('--p1')],
+      ['both', D.sim.p[2]||0, D.analytic.p2, cssVar('--p2')],
+    ];
+    const ymax=Math.max(...groups.map(g=>Math.max(g[1],g[2])))*1.18;
+    const gw=(W)/groups.length, bw=Math.min(46, gw*0.32);
+    ctx.clearRect(0,0,W,H); ctx.font='12px sans-serif';
+    groups.forEach((g,i)=>{
+      const cx=gw*(i+0.5);
+      const hSim=(H-padB-padT)*(g[1]/ymax), hTh=(H-padB-padT)*(g[2]/ymax);
+      // sim bar
+      ctx.fillStyle=cssVar('--accent');
+      ctx.fillRect(cx-bw-2, H-padB-hSim, bw, hSim);
+      // theory outline
+      ctx.strokeStyle=cssVar('--muted'); ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+      ctx.strokeRect(cx+2, H-padB-hTh, bw, hTh); ctx.setLineDash([]);
+      // value
+      ctx.fillStyle=cssVar('--ink'); ctx.textAlign='center';
+      ctx.fillText((g[1]*100).toFixed(1)+'%', cx-bw/2-2, H-padB-hSim-5);
+      ctx.fillStyle=cssVar('--muted');
+      ctx.fillText(g[0], cx, H-6);
+      ctx.fillStyle=g[3];
+      ctx.fillRect(cx-bw-2, H-padB-3, bw, 3);
+    });
+    ctx.textAlign='left';
+  }
+
+  // ===== animated house ==================================================
+  const NS='http://www.w3.org/2000/svg';
+  const scene=document.getElementById('scene');
+  const VW=640, VH=380;
+  // door anchor points (where the occupant stands)
+  const doors=[];
+  const doorY=58, doorGap=VW/(B+1);
+  for(let s=0;s<B;s++) doors.push({x:doorGap*(s+1), y:doorY});
+  // home seats along the bottom lounge
+  const seats=[];
+  for(let i=0;i<C.people;i++){
+    const cols=Math.ceil(C.people/2), row=Math.floor(i/cols), col=i%cols;
+    const x=70 + col*( (VW-140)/(cols-1||1) );
+    const y=255 + row*70;
+    seats.push({x,y});
+  }
+  const palette=['#58a6ff','#f778ba','#3fb950','#d29922','#a371f7','#39c5cf','#ff7b72','#e3b341'];
+
+  // static structure
+  scene.innerHTML='';
+  // floor
+  addRect(8,8,VW-16,VH-16,'none',cssVar('--line'),12);
+  addRect(8,100,VW-16,2,cssVar('--line'));
+  txt(VW/2,128,'living area', cssVar('--muted'),12,'middle');
+  // door elements
+  const doorEls=[];
+  for(let s=0;s<B;s++){
+    const d=doors[s];
+    const g=document.createElementNS(NS,'g');
+    const frame=rect(d.x-34,18,68,74,cssVar('--panel2'),cssVar('--line'),8);
+    const door=rect(d.x-26,24,52,62, cssVar('--green'), '#0b3', 6); door.dataset.role='door';
+    const lbl=text(d.x, 80, 'BATH '+(s+1), '#0b1', 11,'middle'); lbl.style.fontWeight='700';
+    const occLbl=text(d.x, 50, 'VACANT', '#062', 12,'middle'); occLbl.style.fontWeight='700';
+    g.append(frame,door,lbl,occLbl); scene.appendChild(g);
+    doorEls.push({door,occLbl});
+  }
+  // person tokens
+  const tokens=[];
+  for(let i=0;i<C.people;i++){
+    const g=document.createElementNS(NS,'g');
+    const body=circle(0,0,13,palette[i%palette.length]);
+    const ring=circle(0,0,13,'none'); ring.setAttribute('stroke','#0008'); ring.setAttribute('stroke-width','2');
+    const id=text(0,4,String(i+1),'#06121f',12,'middle'); id.style.fontWeight='700';
+    const bub=text(0,-22,'occupied!',cssVar('--amber'),11,'middle');
+    bub.style.fontWeight='700'; bub.style.opacity='0';
+    g.append(body,ring,id,bub); scene.appendChild(g);
+    tokens.push({g,bub,x:seats[i].x,y:seats[i].y, tx:seats[i].x, ty:seats[i].y, rejectFlash:0});
+  }
+
+  // ---- playback state ---------------------------------------------------
+  let t=0, playing=true, last=performance.now();
+  let speed=parseFloat(document.getElementById('speed').value); // sim-minutes/sec = speed*60
+  const visits=D.visits, events=D.events, span=D.sampleMinutes;
+  const speedLbl=document.getElementById('speedLbl');
+  document.getElementById('speed').addEventListener('input',e=>{
+    speed=parseFloat(e.target.value); speedLbl.textContent=speed+'×';
+  });
+  const playBtn=document.getElementById('playBtn');
+  playBtn.addEventListener('click',()=>{ playing=!playing; playBtn.textContent=playing?'⏸ Pause':'▶ Play'; });
+
+  // gantt scrubbing
+  const gantt=document.getElementById('gantt');
+  gantt.addEventListener('click',e=>{
+    const r=gantt.getBoundingClientRect();
+    t = Math.max(0, Math.min(span, (e.clientX-r.left)/r.width*span));
+  });
+
+  function frame(now){
+    const dt=(now-last)/1000; last=now;
+    if(playing){ t += dt*speed*60; if(t>=span) t-=span; }
+    // determine occupant of each bathroom at time t
+    const occByDoor=new Array(B).fill(-1);
+    let occCount=0;
+    for(const v of visits){
+      if(v.rejected) continue;
+      if(v.start<=t && t<v.end){ occByDoor[v.bathroom]=v.person; }
+    }
+    occCount=occByDoor.filter(p=>p>=0).length;
+    // targets: occupants go to their door, others go home
+    const inBath=new Array(C.people).fill(-1);
+    for(let s=0;s<B;s++) if(occByDoor[s]>=0) inBath[occByDoor[s]]=s;
+    for(let i=0;i<C.people;i++){
+      const tk=tokens[i];
+      if(inBath[i]>=0){ tk.tx=doors[inBath[i]].x; tk.ty=doors[inBath[i]].y+34; }
+      else { tk.tx=seats[i].x; tk.ty=seats[i].y; }
+    }
+    // rejection flashes: any reject event within a short recent window
+    for(const tk of tokens) tk.rejectFlash=Math.max(0,tk.rejectFlash-dt);
+    for(const ev of events){
+      if(ev.kind!=='reject') continue;
+      let d=t-ev.t; if(d<0) d+=span;
+      if(d>=0 && d<1.2){ tokens[ev.person].rejectFlash=1.0; }
+    }
+    // move + render tokens
+    for(const tk of tokens){
+      tk.x += (tk.tx-tk.x)*Math.min(1, dt*6);
+      tk.y += (tk.ty-tk.y)*Math.min(1, dt*6);
+      tk.g.setAttribute('transform',`translate(${tk.x.toFixed(1)},${tk.y.toFixed(1)})`);
+      tk.bub.style.opacity = tk.rejectFlash>0 ? Math.min(1,tk.rejectFlash*1.4).toFixed(2) : '0';
+    }
+    // doors
+    for(let s=0;s<B;s++){
+      const busy=occByDoor[s]>=0;
+      doorEls[s].door.setAttribute('fill', busy?cssVar('--red'):cssVar('--green'));
+      doorEls[s].door.setAttribute('stroke', busy?'#911':'#0b3');
+      doorEls[s].occLbl.textContent = busy?('IN USE · #'+(occByDoor[s]+1)):'VACANT';
+      doorEls[s].occLbl.setAttribute('fill', busy?'#fff':'#062');
+    }
+    // clock + pill
+    const dayLen=1440, day=Math.floor(t/dayLen)+1, mins=Math.floor(t%dayLen);
+    const hh=String(Math.floor(mins/60)).padStart(2,'0'), mm=String(mins%60).padStart(2,'0');
+    document.getElementById('clock').textContent=`Day ${day} · ${hh}:${mm}`;
+    const pill=document.getElementById('occPill');
+    pill.textContent=`occupied: ${occCount} / ${B}`;
+    pill.style.color = occCount===B?cssVar('--red'):occCount>0?cssVar('--amber'):cssVar('--muted');
+
+    drawGantt(t);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ===== gantt timeline ==================================================
+  function drawGantt(playT){
+    const cv=gantt, ctx=cv.getContext('2d'); fitHiDPI(cv);
+    const W=cv.clientWidth,H=cv.clientHeight;
+    const padL=34,padR=8,padT=6,padB=16;
+    const rowH=(H-padT-padB)/C.people;
+    const X=m=> padL+(W-padL-padR)*(m/span);
+    ctx.clearRect(0,0,W,H);
+    // day separators
+    ctx.strokeStyle=cssVar('--line'); ctx.fillStyle=cssVar('--muted'); ctx.font='10px sans-serif';
+    for(let d=0; d*1440<=span; d++){ const x=X(d*1440);
+      ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,H-padB);ctx.stroke();
+      ctx.fillText('D'+(d+1), x+2, H-4); }
+    // per-person lane + visits
+    for(let i=0;i<C.people;i++){
+      const y=padT+rowH*i;
+      ctx.fillStyle=cssVar('--muted'); ctx.textAlign='right';
+      ctx.fillText('#'+(i+1), padL-4, y+rowH*0.7);
+    }
+    ctx.textAlign='left';
+    for(const v of visits){
+      const y=padT+rowH*v.person+2, h=Math.max(3,rowH-4);
+      const x0=X(v.start), x1=X(Math.min(span,v.end));
+      ctx.fillStyle = v.rejected ? cssVar('--amber') : (v.bathroom===0?cssVar('--accent'):cssVar('--p1'));
+      ctx.globalAlpha = v.rejected?0.9:0.85;
+      if(v.rejected){ ctx.fillRect(x0-1, y, 3, h); }
+      else ctx.fillRect(x0, y, Math.max(2,x1-x0), h);
+      ctx.globalAlpha=1;
+    }
+    // playhead
+    const px=X(playT);
+    ctx.strokeStyle=cssVar('--ink'); ctx.lineWidth=1.5;
+    ctx.beginPath();ctx.moveTo(px,padT-2);ctx.lineTo(px,H-padB);ctx.stroke();
+  }
+
+  // ---- svg + canvas helpers --------------------------------------------
+  function rect(x,y,w,h,fill,stroke,r){const e=document.createElementNS(NS,'rect');
+    e.setAttribute('x',x);e.setAttribute('y',y);e.setAttribute('width',w);e.setAttribute('height',h);
+    if(r){e.setAttribute('rx',r);e.setAttribute('ry',r);} e.setAttribute('fill',fill);
+    if(stroke){e.setAttribute('stroke',stroke);e.setAttribute('stroke-width',1.5);} return e;}
+  function addRect(x,y,w,h,fill,stroke,r){scene.appendChild(rect(x,y,w,h,fill,stroke,r));}
+  function circle(cx,cy,r,fill){const e=document.createElementNS(NS,'circle');
+    e.setAttribute('cx',cx);e.setAttribute('cy',cy);e.setAttribute('r',r);e.setAttribute('fill',fill);return e;}
+  function text(x,y,s,fill,size,anchor){const e=document.createElementNS(NS,'text');
+    e.setAttribute('x',x);e.setAttribute('y',y);e.setAttribute('fill',fill);
+    e.setAttribute('font-size',size||12);if(anchor)e.setAttribute('text-anchor',anchor);
+    e.textContent=s;return e;}
+  function txt(x,y,s,fill,size,anchor){scene.appendChild(text(x,y,s,fill,size,anchor));}
+  function cssVar(v){ if(!v.startsWith('var(')) return v;
+    return getComputedStyle(document.documentElement).getPropertyValue(v.slice(4,-1)).trim()||v; }
+  function fitHiDPI(cv){ const dpr=window.devicePixelRatio||1;
+    const w=cv.clientWidth||cv.parentElement.clientWidth; const h=cv.height;
+    if(cv.width!==Math.round(w*dpr)||cv._h!==h){ cv.width=Math.round(w*dpr); cv.height=Math.round(h*dpr);
+      cv._h=h; const ctx=cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0); cv.style.height=h+'px';} }
+
+  window.addEventListener('resize',()=>{ drawBars(); drawConvergence(); });
+})();
+</script>
+</body>
+</html>

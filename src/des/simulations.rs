@@ -32,6 +32,11 @@ pub fn simulation_catalogue() -> Vec<(&'static str, fn())> {
             "main_backpropagation",
             crate::des::main_backpropagation::run,
         ),
+        ("main_bathrooms", crate::des::main_bathrooms::run),
+        (
+            "main_two_bathrooms",
+            crate::des::main_two_bathrooms::run,
+        ),
         ("main_build_site", crate::des::main_build_site::run),
         ("main_calculus", crate::des::main_calculus::run),
         (

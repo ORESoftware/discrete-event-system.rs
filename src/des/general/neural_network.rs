@@ -349,6 +349,21 @@ impl TrainableNeuralNetwork for FeedForwardNetwork {
         if learning_rate < 0.0 {
             panic!("learningRate must be non-negative, got {learning_rate}");
         }
+        // A non-finite input/target is a runtime data hazard, not a structural bug:
+        // drop the step (like a divergent gradient) instead of panicking in `forward`,
+        // so a single NaN feature in a (correctly sized) sample can't crash a detached
+        // batch-training worker or silently halt learning. A *dimension* mismatch is
+        // still a programmer error and panics below via `assert_vector`. Mirrors
+        // `train_sample_clipped`.
+        if (!vector_is_finite(input, self.input_dim) || !vector_is_finite(target, self.output_dim))
+            && input.len() == self.input_dim
+            && target.len() == self.output_dim
+        {
+            return TrainSampleResult {
+                loss: f64::NAN,
+                prediction: vec![f64::NAN; self.output_dim],
+            };
+        }
         self.assert_vector(input, self.input_dim, "input");
         self.assert_vector(target, self.output_dim, "target");
 
@@ -362,35 +377,12 @@ impl TrainableNeuralNetwork for FeedForwardNetwork {
             d_a[i] = e;
         }
 
-        for k in (0..self.layers.len()).rev() {
-            let activation = self.layers[k].activation;
-            let prev_a = trace.activations[k].clone();
-            let cur_a = &trace.activations[k + 1];
-            let cur_z = &trace.z[k];
-            let delta: Vec<f64> = (0..cur_a.len())
-                .map(|i| d_a[i] * activation_prime_from_output(activation, cur_a[i], cur_z[i]))
-                .collect();
-
-            let mut d_prev = vec![0.0; prev_a.len()];
-            {
-                let weights = &self.layers[k].weights;
-                for i in 0..weights.len() {
-                    for j in 0..weights[i].len() {
-                        d_prev[j] += weights[i][j] * delta[i];
-                    }
-                }
-            }
-            {
-                let layer = &mut self.layers[k];
-                for i in 0..layer.weights.len() {
-                    for j in 0..layer.weights[i].len() {
-                        layer.weights[i][j] -= learning_rate * delta[i] * prev_a[j];
-                    }
-                    layer.biases[i] -= learning_rate * delta[i];
-                }
-            }
-            d_a = d_prev;
-        }
+        // Finite-guarded backprop, clipping DISABLED (`max_grad_norm = 0`): a finite
+        // gradient yields a weight update byte-identical to the previous plain SGD
+        // step, but a non-finite gradient (e.g. an exploding update from an extreme
+        // sample) now drops the step and leaves the weights untouched instead of
+        // poisoning them — which would otherwise make the next `forward` assert-panic.
+        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, 0.0);
 
         TrainSampleResult { loss, prediction }
     }
@@ -1621,6 +1613,45 @@ mod tests {
         assert_eq!(
             net.layers[0].weights[0], before,
             "dropped steps must leave weights untouched"
+        );
+    }
+
+    #[test]
+    fn unclipped_batch_train_is_finite_guarded_too() {
+        // `train_batch_slices` (the UN-clipped batch path the soccer learner uses via
+        // its overnight self-play training) must be finite-guarded as well: neither a
+        // diverging gradient nor a non-finite sample may write NaN/Inf into the weights
+        // (which would assert-panic the next `forward`).
+        // (a) exploding gradient (huge weights × huge input) → step dropped:
+        let mut net = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![f64::MAX, f64::MAX]],
+            biases: vec![0.0],
+            activation: ActivationName::Linear,
+        }]);
+        let blow: Vec<(&[f64], &[f64])> = vec![(&[f64::MAX, f64::MAX][..], &[0.0][..])];
+        let _ = net.train_batch_slices(blow.into_iter(), 0.1);
+        assert!(
+            net.layers[0]
+                .weights
+                .iter()
+                .flatten()
+                .chain(net.layers[0].biases.iter())
+                .all(|v| v.is_finite()),
+            "diverged gradient must not poison weights via train_batch_slices"
+        );
+
+        // (b) non-finite sample on a healthy net → step dropped, weights untouched:
+        let mut net2 = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.3, -0.2]],
+            biases: vec![0.1],
+            activation: ActivationName::Linear,
+        }]);
+        let before = net2.layers[0].weights[0].clone();
+        let bad: Vec<(&[f64], &[f64])> = vec![(&[f64::NAN, 1.0][..], &[0.5][..])];
+        let _ = net2.train_batch_slices(bad.into_iter(), 0.1);
+        assert_eq!(
+            net2.layers[0].weights[0], before,
+            "NaN sample must leave weights untouched (no poisoning, no panic)"
         );
     }
 

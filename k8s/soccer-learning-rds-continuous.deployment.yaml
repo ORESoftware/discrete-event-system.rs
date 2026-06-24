@@ -198,10 +198,13 @@ spec:
               value: "2026"
             - name: SOCCER_SEED_STRIDE
               value: "1000"
+            # Fresh experiment slug: determinism changes the training environment (formation
+            # LP off vs Clarabel-LP on), so this starts a clean run rather than mutating the
+            # in-progress nondeterministic experiment (whose history stays under its own slug).
             - name: SOCCER_EXPERIMENT_SLUG
-              value: soccer-self-play-k8s-overnight
+              value: soccer-self-play-k8s-deterministic
             - name: SOCCER_EXPERIMENT_NAME
-              value: Soccer self-play k8s overnight evolutionary learning
+              value: Soccer self-play k8s deterministic (formation-LP-off) evolutionary learning
             - name: SOCCER_GAMES
               value: "100"
             - name: SOCCER_PARALLEL_GAMES

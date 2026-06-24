@@ -3782,41 +3782,16 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     };
     solver.solve();
     let solution = &solver.solution;
-    if std::env::var("CLARABEL_DETTEST").is_ok() {
-        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
-        static CALLS: AtomicUsize = AtomicUsize::new(0);
-        let k = CALLS.fetch_add(1, AOrd::Relaxed);
-        if k < 100000 {
-            let mut in_h: u64 = 1469598103934665603;
-            for v in q.iter().chain(b.iter()) {
-                in_h ^= v.to_bits();
-                in_h = in_h.wrapping_mul(1099511628211);
-            }
-            let mut out_h: u64 = 1469598103934665603;
-            let mut x_sum = 0.0f64;
-            for v in solution.x.iter() {
-                out_h ^= v.to_bits();
-                out_h = out_h.wrapping_mul(1099511628211);
-                x_sum += v;
-            }
-            eprintln!(
-                "CLARABEL_DETTEST call={k} status={:?} iters={} in_h={in_h:016x} out_h={out_h:016x} x_sum={x_sum:.17e}",
-                solution.status, solution.iterations
-            );
-        }
-    }
-    // Clarabel's interior-point path is per-process nondeterministic on degenerate
+    // Clarabel's interior-point path can be per-process nondeterministic on degenerate
     // problems (an internal default-hasher container makes the elimination/iteration
-    // order vary across processes), so byte-identical input can yield a different
-    // iterate AND a different terminal status (Solved vs MaxIterations) run to run.
-    // On the soccer formation LP this is the sole source of match nondeterminism. Two
-    // guards make the consumed solution reproducible:
-    //   1. A MaxIterations iterate that is finite and complete is a usable near-optimal
-    //      point — accept it as Optimal so the result is never the empty-vs-full cliff
-    //      (present-vs-absent guidance) that a Solved/MaxIterations split would create.
-    //   2. Quantize the returned x to a fixed grid so the sub-grid cross-process noise
-    //      is rounded away (the grid is far coarser than the noise yet far finer than
-    //      anything gameplay-visible). See `clarabel_solution_quantum`.
+    // order vary), so byte-identical input can yield a different iterate AND a different
+    // terminal status (Solved vs MaxIterations) run to run. Two guards keep the consumed
+    // solution reproducible: (1) a finite, complete MaxIterations iterate is a usable
+    // near-optimal point, accepted as Optimal so the result is never the empty-vs-full
+    // cliff a Solved/MaxIterations split would create; (2) the returned x is quantized to
+    // a fixed grid (see `clarabel_solution_quantum`). NOTE: the soccer formation LP now
+    // runs on the deterministic internal simplex by default; these guards harden the
+    // Clarabel path for any caller that still uses it.
     let near_optimal_iterate = matches!(solution.status, SolverStatus::MaxIterations)
         && solution.x.len() == n
         && solution.x.iter().all(|v| v.is_finite());

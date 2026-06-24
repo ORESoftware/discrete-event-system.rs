@@ -179,6 +179,17 @@ spec:
               value: "1"
             - name: SOCCER_REQUIRE_POSTGRES
               value: "true"
+            # Reproducible self-play: route the formation LP through the deterministic
+            # internal simplex instead of Clarabel (whose interior-point solve is
+            # per-process nondeterministic on the degenerate formation LP, which made
+            # identical seeds diverge and injected noise into the learning rewards). Safe
+            # for this HEADLESS learner -- the deterministic solve's latency is irrelevant
+            # (no realtime contract); do NOT set it on the live/realtime server. NOTE:
+            # under determinism the LP's iteration-gated breaker trips to the heuristic
+            # fallback, so the formation LP is effectively off (deterministic heuristic
+            # positioning) -- a training-environment change vs the Clarabel-LP runs.
+            - name: SOCCER_FORMATION_LP_DETERMINISTIC
+              value: "1"
             - name: SOCCER_RUN_ID_PREFIX
               value: codex-soccer-learning-overnight
             - name: SOCCER_SEED_BASE

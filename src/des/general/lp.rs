@@ -3684,22 +3684,6 @@ pub fn solve_lp_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions)
 ///     variable bounds (`lb <= x <= ub`)   -> NonnegativeCone rows.
 /// LP has no quadratic term, so `P = 0`. `Sense::Max` is handled by negating
 /// the linear objective and reporting the original `c'x`.
-/// Grid (yards/units) the Clarabel LP solution is snapped to for cross-process
-/// determinism. `CLARABEL_SOLUTION_QUANTUM` overrides it; `0` disables snapping.
-/// Default chosen to sit far above Clarabel's interior-point round-off noise yet
-/// far below any gameplay-visible distance.
-fn clarabel_solution_quantum() -> f64 {
-    use std::sync::OnceLock;
-    static V: OnceLock<f64> = OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("CLARABEL_SOLUTION_QUANTUM")
-            .ok()
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .filter(|q| q.is_finite() && *q >= 0.0)
-            .unwrap_or(1.0e-3)
-    })
-}
-
 pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     use clarabel::algebra::CscMatrix;
     use clarabel::solver::{
@@ -3782,22 +3766,8 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     };
     solver.solve();
     let solution = &solver.solution;
-    // Clarabel's interior-point path can be per-process nondeterministic on degenerate
-    // problems (an internal default-hasher container makes the elimination/iteration
-    // order vary), so byte-identical input can yield a different iterate AND a different
-    // terminal status (Solved vs MaxIterations) run to run. Two guards keep the consumed
-    // solution reproducible: (1) a finite, complete MaxIterations iterate is a usable
-    // near-optimal point, accepted as Optimal so the result is never the empty-vs-full
-    // cliff a Solved/MaxIterations split would create; (2) the returned x is quantized to
-    // a fixed grid (see `clarabel_solution_quantum`). NOTE: the soccer formation LP now
-    // runs on the deterministic internal simplex by default; these guards harden the
-    // Clarabel path for any caller that still uses it.
-    let near_optimal_iterate = matches!(solution.status, SolverStatus::MaxIterations)
-        && solution.x.len() == n
-        && solution.x.iter().all(|v| v.is_finite());
     let status = match solution.status {
         SolverStatus::Solved | SolverStatus::AlmostSolved => LPStatus::Optimal,
-        SolverStatus::MaxIterations if near_optimal_iterate => LPStatus::Optimal,
         SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
             LPStatus::Infeasible
         }
@@ -3805,19 +3775,8 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
         SolverStatus::MaxIterations => LPStatus::IterLimit,
         _ => LPStatus::NumericalError,
     };
-    let quantum = clarabel_solution_quantum();
     let x = if status == LPStatus::Optimal {
-        solution
-            .x
-            .iter()
-            .map(|&v| {
-                if quantum > 0.0 && v.is_finite() {
-                    (v / quantum).round() * quantum
-                } else {
-                    v
-                }
-            })
-            .collect()
+        solution.x.clone()
     } else {
         Vec::new()
     };

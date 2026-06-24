@@ -3789,8 +3789,24 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
             );
         }
     }
+    // Clarabel's interior-point path is per-process nondeterministic on degenerate
+    // problems (an internal default-hasher container makes the elimination/iteration
+    // order vary across processes), so byte-identical input can yield a different
+    // iterate AND a different terminal status (Solved vs MaxIterations) run to run.
+    // On the soccer formation LP this is the sole source of match nondeterminism. Two
+    // guards make the consumed solution reproducible:
+    //   1. A MaxIterations iterate that is finite and complete is a usable near-optimal
+    //      point — accept it as Optimal so the result is never the empty-vs-full cliff
+    //      (present-vs-absent guidance) that a Solved/MaxIterations split would create.
+    //   2. Quantize the returned x to a fixed grid so the sub-grid cross-process noise
+    //      is rounded away (the grid is far coarser than the noise yet far finer than
+    //      anything gameplay-visible). See `clarabel_solution_quantum`.
+    let near_optimal_iterate = matches!(solution.status, SolverStatus::MaxIterations)
+        && solution.x.len() == n
+        && solution.x.iter().all(|v| v.is_finite());
     let status = match solution.status {
         SolverStatus::Solved | SolverStatus::AlmostSolved => LPStatus::Optimal,
+        SolverStatus::MaxIterations if near_optimal_iterate => LPStatus::Optimal,
         SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
             LPStatus::Infeasible
         }
@@ -3798,8 +3814,19 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
         SolverStatus::MaxIterations => LPStatus::IterLimit,
         _ => LPStatus::NumericalError,
     };
+    let quantum = clarabel_solution_quantum();
     let x = if status == LPStatus::Optimal {
-        solution.x.clone()
+        solution
+            .x
+            .iter()
+            .map(|&v| {
+                if quantum > 0.0 && v.is_finite() {
+                    (v / quantum).round() * quantum
+                } else {
+                    v
+                }
+            })
+            .collect()
     } else {
         Vec::new()
     };

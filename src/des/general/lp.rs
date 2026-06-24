@@ -3770,7 +3770,7 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
         use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         let k = CALLS.fetch_add(1, AOrd::Relaxed);
-        if k < 3 {
+        if k < 400 {
             let mut in_h: u64 = 1469598103934665603;
             for v in q.iter().chain(b.iter()) {
                 in_h ^= v.to_bits();

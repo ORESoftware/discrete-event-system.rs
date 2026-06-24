@@ -3766,6 +3766,29 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     };
     solver.solve();
     let solution = &solver.solution;
+    if std::env::var("CLARABEL_DETTEST").is_ok() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let k = CALLS.fetch_add(1, AOrd::Relaxed);
+        if k < 3 {
+            let mut in_h: u64 = 1469598103934665603;
+            for v in q.iter().chain(b.iter()) {
+                in_h ^= v.to_bits();
+                in_h = in_h.wrapping_mul(1099511628211);
+            }
+            let mut out_h: u64 = 1469598103934665603;
+            let mut x_sum = 0.0f64;
+            for v in solution.x.iter() {
+                out_h ^= v.to_bits();
+                out_h = out_h.wrapping_mul(1099511628211);
+                x_sum += v;
+            }
+            eprintln!(
+                "CLARABEL_DETTEST call={k} status={:?} iters={} in_h={in_h:016x} out_h={out_h:016x} x_sum={x_sum:.17e}",
+                solution.status, solution.iterations
+            );
+        }
+    }
     let status = match solution.status {
         SolverStatus::Solved | SolverStatus::AlmostSolved => LPStatus::Optimal,
         SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {

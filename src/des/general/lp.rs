@@ -3750,9 +3750,7 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     }
     let settings = DefaultSettingsBuilder::<f64>::default()
         .verbose(false)
-        .max_iter(200)
-        .presolve_enable(false)
-        .equilibrate_enable(false)
+        .max_iter(2000)
         .build()
         .expect("clarabel default settings build");
     let mut solver = match DefaultSolver::new(&p_mat, &q, &a_mat, &b, &cones, settings) {

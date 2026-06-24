@@ -179,17 +179,19 @@ spec:
               value: "1"
             - name: SOCCER_REQUIRE_POSTGRES
               value: "true"
-            # Reproducible self-play: route the formation LP through the deterministic
-            # internal simplex instead of Clarabel (whose interior-point solve is
-            # per-process nondeterministic on the degenerate formation LP, which made
-            # identical seeds diverge and injected noise into the learning rewards). Safe
-            # for this HEADLESS learner -- the deterministic solve's latency is irrelevant
-            # (no realtime contract); do NOT set it on the live/realtime server. NOTE:
-            # under determinism the LP's iteration-gated breaker trips to the heuristic
-            # fallback, so the formation LP is effectively off (deterministic heuristic
-            # positioning) -- a training-environment change vs the Clarabel-LP runs.
-            - name: SOCCER_FORMATION_LP_DETERMINISTIC
-              value: "1"
+            # Reproducible self-play. Clarabel's interior-point solve of the degenerate
+            # formation LP is PER-PROCESS NONDETERMINISTIC (byte-identical input -> different
+            # iterate AND terminal status across processes), which made identical seeds
+            # diverge into different matches and injected noise into the learning rewards.
+            # Disabling the LP solver routes formation positioning to the deterministic
+            # heuristic fallback (no Clarabel) -> identical seeds produce byte-identical
+            # matches. This works on the CURRENT engine (the gate is pre-existing); no code
+            # deploy needed. The deterministic-but-slow internal simplex is NOT used here
+            # (it would blow throughput); the heuristic positioning is the deterministic
+            # training environment. (This is a training-environment change vs the Clarabel-LP
+            # runs, hence the fresh experiment slug below.) Do NOT set on the realtime server.
+            - name: SOCCER_FORMATION_LP_INTERNAL_SIMPLEX
+              value: "0"
             - name: SOCCER_RUN_ID_PREFIX
               value: codex-soccer-learning-overnight
             - name: SOCCER_SEED_BASE

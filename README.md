@@ -1,4 +1,12 @@
-# discrete-event-system.rs (`des_engine`)
+<!-- BEGIN k8s-cluster-submodule-notice -->
+> [!NOTE]
+> **Canonical source.** This repository is the source of truth for its code. It
+> is also vendored as a **secondary** git submodule of
+> [ORESoftware/k8s-cluster](https://github.com/ORESoftware/k8s-cluster) at
+> `remote/submodules/discrete-event-system.rs` — make changes here, not in that submodule checkout.
+>
+> On disk: source clone `~/codes/ores/discrete-event-system.rs` · submodule checkout `~/codes/ores/k8s-cluster/remote/submodules/discrete-event-system.rs`.
+<!-- END k8s-cluster-submodule-notice --># discrete-event-system.rs (`des_engine`)
 
 `des_engine` is a Rust library/SDK for modeling, simulating, solving, and
 rendering discrete, continuous, and mixed systems. It is the Rust port of the

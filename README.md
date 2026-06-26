@@ -6,7 +6,9 @@
 > `remote/submodules/discrete-event-system.rs` — make changes here, not in that submodule checkout.
 >
 > On disk: source clone `~/codes/ores/discrete-event-system.rs` · submodule checkout `~/codes/ores/k8s-cluster/remote/submodules/discrete-event-system.rs`.
-<!-- END k8s-cluster-submodule-notice --># discrete-event-system.rs (`des_engine`)
+<!-- END k8s-cluster-submodule-notice -->
+
+# discrete-event-system.rs (`des_engine`)
 
 `des_engine` is a Rust library/SDK for modeling, simulating, solving, and
 rendering discrete, continuous, and mixed systems. It is the Rust port of the

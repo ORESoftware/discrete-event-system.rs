@@ -241,6 +241,15 @@ spec:
               value: "16"
             - name: SOCCER_NEURAL_DRAIN_TIMEOUT_MS
               value: "60000"
+            # Train the dedicated goalkeeper actor (SoccerKeeperPolicyHead): a separate
+            # policy over the keeper action vocabulary (distribute-short/long, sweep, claim,
+            # set) learned in its own right against the keeper save reward and concede
+            # penalty, instead of the keeper sharing the outfield policy. Pairs with the
+            # engine's keeper-weighted turnover penalty (DD_SOCCER_DISABLE_KEEPER_GIVEAWAY_PENALTY,
+            # default-on) so goalkeeper giveaways are both learned as their own decision and
+            # priced as the costly mistakes they are. Off ⇒ keeper had no specialist learning.
+            - name: DD_SOCCER_ENABLE_KEEPER_POLICY_HEAD
+              value: "1"
             - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
               value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES

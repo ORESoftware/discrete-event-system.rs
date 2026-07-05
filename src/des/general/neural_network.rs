@@ -562,13 +562,42 @@ impl FeedForwardNetwork {
             1.0
         };
         let step = learning_rate * scale;
-        for k in 0..self.layers.len() {
-            let layer = &mut self.layers[k];
-            for i in 0..layer.weights.len() {
-                for j in 0..layer.weights[i].len() {
-                    layer.weights[i][j] -= step * weight_grads[k][i][j];
+        let momentum = des_neural_momentum();
+        if momentum > 0.0 {
+            // Lazily size the transient velocity buffers to the layer shapes on first use.
+            if self.weight_velocity.len() != self.layers.len() {
+                self.weight_velocity = self
+                    .layers
+                    .iter()
+                    .map(|l| l.weights.iter().map(|r| vec![0.0; r.len()]).collect())
+                    .collect();
+                self.bias_velocity = self
+                    .layers
+                    .iter()
+                    .map(|l| vec![0.0; l.biases.len()])
+                    .collect();
+            }
+            for k in 0..self.layers.len() {
+                for i in 0..self.layers[k].weights.len() {
+                    for j in 0..self.layers[k].weights[i].len() {
+                        let v = momentum * self.weight_velocity[k][i][j] + weight_grads[k][i][j];
+                        self.weight_velocity[k][i][j] = v;
+                        self.layers[k].weights[i][j] -= step * v;
+                    }
+                    let bv = momentum * self.bias_velocity[k][i] + bias_grads[k][i];
+                    self.bias_velocity[k][i] = bv;
+                    self.layers[k].biases[i] -= step * bv;
                 }
-                layer.biases[i] -= step * bias_grads[k][i];
+            }
+        } else {
+            for k in 0..self.layers.len() {
+                let layer = &mut self.layers[k];
+                for i in 0..layer.weights.len() {
+                    for j in 0..layer.weights[i].len() {
+                        layer.weights[i][j] -= step * weight_grads[k][i][j];
+                    }
+                    layer.biases[i] -= step * bias_grads[k][i];
+                }
             }
         }
         ClippedTrainResult {

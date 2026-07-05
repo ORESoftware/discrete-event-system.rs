@@ -179,32 +179,16 @@ spec:
               value: "1"
             - name: SOCCER_REQUIRE_POSTGRES
               value: "true"
-            # Reproducible self-play. Clarabel's interior-point solve of the degenerate
-            # formation LP is PER-PROCESS NONDETERMINISTIC (byte-identical input -> different
-            # iterate AND terminal status across processes), which made identical seeds
-            # diverge into different matches and injected noise into the learning rewards.
-            # Disabling the LP solver routes formation positioning to the deterministic
-            # heuristic fallback (no Clarabel) -> identical seeds produce byte-identical
-            # matches. This works on the CURRENT engine (the gate is pre-existing); no code
-            # deploy needed. The deterministic-but-slow internal simplex is NOT used here
-            # (it would blow throughput); the heuristic positioning is the deterministic
-            # training environment. (This is a training-environment change vs the Clarabel-LP
-            # runs, hence the fresh experiment slug below.) Do NOT set on the realtime server.
-            - name: SOCCER_FORMATION_LP_INTERNAL_SIMPLEX
-              value: "0"
             - name: SOCCER_RUN_ID_PREFIX
               value: codex-soccer-learning-overnight
             - name: SOCCER_SEED_BASE
               value: "2026"
             - name: SOCCER_SEED_STRIDE
               value: "1000"
-            # Fresh experiment slug: determinism changes the training environment (formation
-            # LP off vs Clarabel-LP on), so this starts a clean run rather than mutating the
-            # in-progress nondeterministic experiment (whose history stays under its own slug).
             - name: SOCCER_EXPERIMENT_SLUG
-              value: soccer-self-play-k8s-deterministic
+              value: soccer-self-play-k8s-overnight
             - name: SOCCER_EXPERIMENT_NAME
-              value: Soccer self-play k8s deterministic (formation-LP-off) evolutionary learning
+              value: Soccer self-play k8s overnight evolutionary learning
             - name: SOCCER_GAMES
               value: "100"
             - name: SOCCER_PARALLEL_GAMES
@@ -241,15 +225,6 @@ spec:
               value: "16"
             - name: SOCCER_NEURAL_DRAIN_TIMEOUT_MS
               value: "60000"
-            # Train the dedicated goalkeeper actor (SoccerKeeperPolicyHead): a separate
-            # policy over the keeper action vocabulary (distribute-short/long, sweep, claim,
-            # set) learned in its own right against the keeper save reward and concede
-            # penalty, instead of the keeper sharing the outfield policy. Pairs with the
-            # engine's keeper-weighted turnover penalty (DD_SOCCER_DISABLE_KEEPER_GIVEAWAY_PENALTY,
-            # default-on) so goalkeeper giveaways are both learned as their own decision and
-            # priced as the costly mistakes they are. Off ⇒ keeper had no specialist learning.
-            - name: DD_SOCCER_ENABLE_KEEPER_POLICY_HEAD
-              value: "1"
             - name: SOCCER_POSTGRES_POLICY_VERSION_INTERVAL_GAMES
               value: "1"
             - name: SOCCER_POSTGRES_COMPLETED_RUN_BATCH_GAMES

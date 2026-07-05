@@ -126,6 +126,26 @@ pub struct FeedForwardNetwork {
     pub layers: Vec<DenseLayerConfig>,
     pub input_dim: usize,
     pub output_dim: usize,
+    /// Transient SGD-momentum velocity buffers (NOT serialized — training state only), lazily
+    /// sized to match `layers` on the first momentum step. Empty ⇒ plain SGD. Gated by the
+    /// `DES_NEURAL_MOMENTUM` env (0 ⇒ off). Momentum is the standard fix for plain-SGD's slow,
+    /// plateau-prone convergence: `v ← μ·v + grad; w ← w − step·v`.
+    weight_velocity: Vec<Vec<Vec<f64>>>,
+    bias_velocity: Vec<Vec<f64>>,
+}
+
+/// Cached SGD-momentum coefficient (`DES_NEURAL_MOMENTUM`, clamped [0,1)). 0 (default) ⇒ plain SGD,
+/// byte-identical to before. ~0.9 is the classic value.
+fn des_neural_momentum() -> f64 {
+    use std::sync::OnceLock;
+    static V: OnceLock<f64> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("DES_NEURAL_MOMENTUM")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|m| m.is_finite() && *m >= 0.0 && *m < 1.0)
+            .unwrap_or(0.0)
+    })
 }
 
 fn validate_shape(layers: &[DenseLayerConfig]) {

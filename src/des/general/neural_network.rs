@@ -187,6 +187,8 @@ impl FeedForwardNetwork {
             layers,
             input_dim,
             output_dim,
+            weight_velocity: Vec::new(),
+            bias_velocity: Vec::new(),
         }
     }
 

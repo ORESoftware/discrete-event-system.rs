@@ -706,7 +706,37 @@ impl FeedForwardNetwork {
         }
         total / (count.max(1) as f64)
     }
+
+    /// Compat shim for the soccer-engine `main` momentum-optimizer API. `main`
+    /// threads an explicit per-network momentum + `&mut FeedForwardMomentumState`
+    /// (its own optimizer design). This des already applies momentum internally
+    /// inside `train_batch_slices_clipped` (see `des_neural_momentum`), so we
+    /// delegate to it and treat the passed `momentum`/`state` as advisory. The
+    /// update is behaviourally identical to `train_batch_slices_clipped`, which is
+    /// sufficient for the Part-B action-space experiment: it holds the optimizer
+    /// constant across the discretized-kick-on vs -off arms.
+    pub fn train_batch_slices_clipped_with_momentum<'a, I>(
+        &mut self,
+        samples: I,
+        learning_rate: f64,
+        max_grad_norm: f64,
+        _momentum: f64,
+        _state: &mut FeedForwardMomentumState,
+    ) -> f64
+    where
+        I: IntoIterator<Item = (&'a [f64], &'a [f64])>,
+    {
+        self.train_batch_slices_clipped(samples, learning_rate, max_grad_norm)
+    }
 }
+
+/// Compat placeholder for the soccer-engine `main` per-network momentum-optimizer
+/// state. This des carries momentum in the network's own `weight_velocity`/
+/// `bias_velocity` buffers (see `des_neural_momentum`), so this state holds
+/// nothing; it exists so `main` — which constructs and threads a
+/// `&mut FeedForwardMomentumState` — compiles and links against this des.
+#[derive(Clone, Debug, Default)]
+pub struct FeedForwardMomentumState;
 
 /// Whether `v` has the expected length and every component is finite. Used by
 /// the divergence-guarded trainers to drop a step on non-finite **data** (a

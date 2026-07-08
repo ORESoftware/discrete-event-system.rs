@@ -463,10 +463,32 @@ impl FeedForwardNetwork {
     fn apply_output_error_gradient(
         &mut self,
         trace: &ForwardTrace,
+        d_a: Vec<f64>,
+        loss: f64,
+        learning_rate: f64,
+        max_grad_norm: f64,
+    ) -> ClippedTrainResult {
+        self.apply_output_error_gradient_opt(trace, d_a, loss, learning_rate, max_grad_norm, 0.0, None)
+    }
+
+    /// Core gradient application shared by the plain and momentum trainers.
+    ///
+    /// With `state = None` this is plain clipped SGD (`w ← w − learning_rate·scale·g`).
+    /// With a `state`, it applies a heavy-ball update on the *clipped* gradient:
+    ///   `v ← momentum·v + scale·g`,   `w ← w − learning_rate·v`
+    /// so `momentum == 0` reproduces the plain step exactly. Velocity persists in
+    /// `state` across calls and must be threaded per-network. On a dropped step
+    /// (non-finite gradient) neither the weights nor the velocity are touched. A
+    /// non-finite `momentum` is treated as 0.
+    fn apply_output_error_gradient_opt(
+        &mut self,
+        trace: &ForwardTrace,
         mut d_a: Vec<f64>,
         loss: f64,
         learning_rate: f64,
         max_grad_norm: f64,
+        momentum: f64,
+        state: Option<&mut FeedForwardMomentumState>,
     ) -> ClippedTrainResult {
         // Accumulate per-layer gradients without mutating the network yet.
         let mut weight_grads: Vec<Vec<Vec<f64>>> = self

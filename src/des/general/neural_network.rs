@@ -126,26 +126,6 @@ pub struct FeedForwardNetwork {
     pub layers: Vec<DenseLayerConfig>,
     pub input_dim: usize,
     pub output_dim: usize,
-    /// Transient SGD-momentum velocity buffers (NOT serialized — training state only), lazily
-    /// sized to match `layers` on the first momentum step. Empty ⇒ plain SGD. Gated by the
-    /// `DES_NEURAL_MOMENTUM` env (0 ⇒ off). Momentum is the standard fix for plain-SGD's slow,
-    /// plateau-prone convergence: `v ← μ·v + grad; w ← w − step·v`.
-    weight_velocity: Vec<Vec<Vec<f64>>>,
-    bias_velocity: Vec<Vec<f64>>,
-}
-
-/// Cached SGD-momentum coefficient (`DES_NEURAL_MOMENTUM`, clamped [0,1)). 0 (default) ⇒ plain SGD,
-/// byte-identical to before. ~0.9 is the classic value.
-fn des_neural_momentum() -> f64 {
-    use std::sync::OnceLock;
-    static V: OnceLock<f64> = OnceLock::new();
-    *V.get_or_init(|| {
-        std::env::var("DES_NEURAL_MOMENTUM")
-            .ok()
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .filter(|m| m.is_finite() && *m >= 0.0 && *m < 1.0)
-            .unwrap_or(0.0)
-    })
 }
 
 fn validate_shape(layers: &[DenseLayerConfig]) {
@@ -187,8 +167,6 @@ impl FeedForwardNetwork {
             layers,
             input_dim,
             output_dim,
-            weight_velocity: Vec::new(),
-            bias_velocity: Vec::new(),
         }
     }
 
@@ -562,42 +540,13 @@ impl FeedForwardNetwork {
             1.0
         };
         let step = learning_rate * scale;
-        let momentum = des_neural_momentum();
-        if momentum > 0.0 {
-            // Lazily size the transient velocity buffers to the layer shapes on first use.
-            if self.weight_velocity.len() != self.layers.len() {
-                self.weight_velocity = self
-                    .layers
-                    .iter()
-                    .map(|l| l.weights.iter().map(|r| vec![0.0; r.len()]).collect())
-                    .collect();
-                self.bias_velocity = self
-                    .layers
-                    .iter()
-                    .map(|l| vec![0.0; l.biases.len()])
-                    .collect();
-            }
-            for k in 0..self.layers.len() {
-                for i in 0..self.layers[k].weights.len() {
-                    for j in 0..self.layers[k].weights[i].len() {
-                        let v = momentum * self.weight_velocity[k][i][j] + weight_grads[k][i][j];
-                        self.weight_velocity[k][i][j] = v;
-                        self.layers[k].weights[i][j] -= step * v;
-                    }
-                    let bv = momentum * self.bias_velocity[k][i] + bias_grads[k][i];
-                    self.bias_velocity[k][i] = bv;
-                    self.layers[k].biases[i] -= step * bv;
+        for k in 0..self.layers.len() {
+            let layer = &mut self.layers[k];
+            for i in 0..layer.weights.len() {
+                for j in 0..layer.weights[i].len() {
+                    layer.weights[i][j] -= step * weight_grads[k][i][j];
                 }
-            }
-        } else {
-            for k in 0..self.layers.len() {
-                let layer = &mut self.layers[k];
-                for i in 0..layer.weights.len() {
-                    for j in 0..layer.weights[i].len() {
-                        layer.weights[i][j] -= step * weight_grads[k][i][j];
-                    }
-                    layer.biases[i] -= step * bias_grads[k][i];
-                }
+                layer.biases[i] -= step * bias_grads[k][i];
             }
         }
         ClippedTrainResult {
@@ -707,14 +656,15 @@ impl FeedForwardNetwork {
         total / (count.max(1) as f64)
     }
 
-    /// Compat shim for the soccer-engine `main` momentum-optimizer API. `main`
-    /// threads an explicit per-network momentum + `&mut FeedForwardMomentumState`
-    /// (its own optimizer design). This des already applies momentum internally
-    /// inside `train_batch_slices_clipped` (see `des_neural_momentum`), so we
-    /// delegate to it and treat the passed `momentum`/`state` as advisory. The
-    /// update is behaviourally identical to `train_batch_slices_clipped`, which is
-    /// sufficient for the Part-B action-space experiment: it holds the optimizer
-    /// constant across the discretized-kick-on vs -off arms.
+    /// Compat shim for the soccer-engine `main` momentum-optimizer API.
+    ///
+    /// WARNING: momentum is NOT implemented here. `_momentum` and `_state` are
+    /// accepted and ignored, so this performs plain (momentum-free) SGD by
+    /// delegating to `train_batch_slices_clipped`. The soccer engine's default
+    /// `optimizer_momentum` is 0.0, so default runs are unaffected — but any run
+    /// configured with a nonzero momentum silently gets plain SGD, not the
+    /// heavy-ball update it asks for. To honor it, store per-parameter velocity
+    /// buffers in `FeedForwardMomentumState` and apply them here.
     pub fn train_batch_slices_clipped_with_momentum<'a, I>(
         &mut self,
         samples: I,
@@ -730,11 +680,8 @@ impl FeedForwardNetwork {
     }
 }
 
-/// Compat placeholder for the soccer-engine `main` per-network momentum-optimizer
-/// state. This des carries momentum in the network's own `weight_velocity`/
-/// `bias_velocity` buffers (see `des_neural_momentum`), so this state holds
-/// nothing; it exists so `main` — which constructs and threads a
-/// `&mut FeedForwardMomentumState` — compiles and links against this des.
+/// Compat placeholder for the soccer-engine `main` per-network momentum state (empty; this des
+/// carries momentum in its own velocity buffers). Exists so `main` compiles/links against this des.
 #[derive(Clone, Debug, Default)]
 pub struct FeedForwardMomentumState;
 

@@ -561,14 +561,41 @@ impl FeedForwardNetwork {
         } else {
             1.0
         };
-        let step = learning_rate * scale;
-        for k in 0..self.layers.len() {
-            let layer = &mut self.layers[k];
-            for i in 0..layer.weights.len() {
-                for j in 0..layer.weights[i].len() {
-                    layer.weights[i][j] -= step * weight_grads[k][i][j];
+        match state {
+            Some(state) => {
+                // Heavy-ball momentum: accumulate the clipped gradient into a
+                // persistent velocity, then step by the velocity. Zero-initialised
+                // velocity ⇒ the first step equals plain SGD; momentum == 0 ⇒ every
+                // step equals plain SGD.
+                let momentum = if momentum.is_finite() { momentum } else { 0.0 };
+                state.ensure_shapes(&self.layers);
+                for k in 0..self.layers.len() {
+                    let layer = &mut self.layers[k];
+                    let w_vel = &mut state.weight_vel[k];
+                    let b_vel = &mut state.bias_vel[k];
+                    for i in 0..layer.weights.len() {
+                        for j in 0..layer.weights[i].len() {
+                            let v = momentum * w_vel[i][j] + scale * weight_grads[k][i][j];
+                            w_vel[i][j] = v;
+                            layer.weights[i][j] -= learning_rate * v;
+                        }
+                        let v = momentum * b_vel[i] + scale * bias_grads[k][i];
+                        b_vel[i] = v;
+                        layer.biases[i] -= learning_rate * v;
+                    }
                 }
-                layer.biases[i] -= step * bias_grads[k][i];
+            }
+            None => {
+                let step = learning_rate * scale;
+                for k in 0..self.layers.len() {
+                    let layer = &mut self.layers[k];
+                    for i in 0..layer.weights.len() {
+                        for j in 0..layer.weights[i].len() {
+                            layer.weights[i][j] -= step * weight_grads[k][i][j];
+                        }
+                        layer.biases[i] -= step * bias_grads[k][i];
+                    }
+                }
             }
         }
         ClippedTrainResult {

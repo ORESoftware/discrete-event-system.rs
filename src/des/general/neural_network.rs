@@ -705,27 +705,92 @@ impl FeedForwardNetwork {
         total / (count.max(1) as f64)
     }
 
-    /// Compat shim for the soccer-engine `main` momentum-optimizer API.
-    ///
-    /// WARNING: momentum is NOT implemented here. `_momentum` and `_state` are
-    /// accepted and ignored, so this performs plain (momentum-free) SGD by
-    /// delegating to `train_batch_slices_clipped`. The soccer engine's default
-    /// `optimizer_momentum` is 0.0, so default runs are unaffected — but any run
-    /// configured with a nonzero momentum silently gets plain SGD, not the
-    /// heavy-ball update it asks for. To honor it, store per-parameter velocity
-    /// buffers in `FeedForwardMomentumState` and apply them here.
+    /// Momentum variant of [`train_sample_clipped`]: identical finite-guard and
+    /// grad-norm clip, but applies a heavy-ball update using the velocity stored in
+    /// `state`. See [`FeedForwardNetwork::apply_output_error_gradient_opt`] for the
+    /// update rule. `momentum ∈ [0, 1)` (0 == plain SGD); a non-finite `momentum`
+    /// is treated as 0.
+    pub fn train_sample_clipped_with_momentum(
+        &mut self,
+        input: &[f64],
+        target: &[f64],
+        learning_rate: f64,
+        max_grad_norm: f64,
+        momentum: f64,
+        state: &mut FeedForwardMomentumState,
+    ) -> ClippedTrainResult {
+        if learning_rate < 0.0 {
+            panic!("learningRate must be non-negative, got {learning_rate}");
+        }
+        // Same non-finite-data guard as `train_sample_clipped`: drop the step
+        // rather than panic in `forward`; a dimension mismatch still panics.
+        if !vector_is_finite(input, self.input_dim) || !vector_is_finite(target, self.output_dim) {
+            if input.len() == self.input_dim && target.len() == self.output_dim {
+                return ClippedTrainResult {
+                    loss: f64::NAN,
+                    applied: false,
+                    clipped: false,
+                };
+            }
+        }
+        self.assert_vector(input, self.input_dim, "input");
+        self.assert_vector(target, self.output_dim, "target");
+
+        let trace = self.forward(input);
+        let prediction = &trace.activations[self.layers.len()];
+        let mut loss = 0.0;
+        let mut d_a = vec![0.0; self.output_dim];
+        for i in 0..self.output_dim {
+            let e = prediction[i] - target[i];
+            loss += 0.5 * e * e;
+            d_a[i] = e;
+        }
+        self.apply_output_error_gradient_opt(
+            &trace,
+            d_a,
+            loss,
+            learning_rate,
+            max_grad_norm,
+            momentum,
+            Some(state),
+        )
+    }
+
+    /// Mean-loss batch trainer with heavy-ball momentum — the momentum counterpart
+    /// of [`train_batch_slices_clipped`]. `state` holds the per-network velocity and
+    /// **must persist across batches**, so pass the SAME `state` on every call for a
+    /// given network (allocate one `FeedForwardMomentumState::default()` per network
+    /// and thread `&mut` it). `momentum ∈ [0, 1)`; 0 reproduces plain SGD exactly.
+    /// Non-finite samples are skipped and excluded from the reported mean, as in the
+    /// non-momentum trainer.
     pub fn train_batch_slices_clipped_with_momentum<'a, I>(
         &mut self,
         samples: I,
         learning_rate: f64,
         max_grad_norm: f64,
-        _momentum: f64,
-        _state: &mut FeedForwardMomentumState,
+        momentum: f64,
+        state: &mut FeedForwardMomentumState,
     ) -> f64
     where
         I: IntoIterator<Item = (&'a [f64], &'a [f64])>,
     {
-        self.train_batch_slices_clipped(samples, learning_rate, max_grad_norm)
+        let mut total = 0.0;
+        let mut count = 0usize;
+        for (input, target) in samples {
+            let result = self.train_sample_clipped_with_momentum(
+                input,
+                target,
+                learning_rate,
+                max_grad_norm,
+                momentum,
+                state,
+            );
+            if result.applied && result.loss.is_finite() {
+                total += result.loss;
+                count += 1;
+            }
+        }
+        total / (count.max(1) as f64)
     }
 }
 

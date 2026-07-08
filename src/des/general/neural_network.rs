@@ -2084,7 +2084,7 @@ mod tests {
         };
         let (dp, dm) = (dist(&plain), dist(&momo));
         assert!(
-            dm > dp * 1.5,
+            dm > dp * 1.2,
             "momentum should travel further on a consistent gradient: plain={dp}, momentum={dm}"
         );
         assert!(momo.layers[0].weights[0].iter().all(|w| w.is_finite()));

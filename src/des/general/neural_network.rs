@@ -2014,4 +2014,109 @@ mod tests {
             );
         }
     }
+
+    fn linear_unit() -> FeedForwardNetwork {
+        FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1]],
+            biases: vec![0.05],
+            activation: ActivationName::Linear,
+        }])
+    }
+
+    #[test]
+    fn momentum_zero_matches_plain_sgd_bit_for_bit() {
+        // With momentum == 0 the heavy-ball trainer must reproduce plain clipped SGD
+        // exactly — this is the safety property that makes the engine's default
+        // optimizer_momentum = 0.0 a true no-op change.
+        let mut plain = linear_unit();
+        let mut momo = linear_unit();
+        let mut state = FeedForwardMomentumState::default();
+        let batch: Vec<(&[f64], &[f64])> = vec![
+            (&[1.0, 2.0][..], &[1.5][..]),
+            (&[-0.5, 0.3][..], &[-0.2][..]),
+            (&[0.7, -1.1][..], &[0.9][..]),
+        ];
+        for _ in 0..50 {
+            let lp = plain.train_batch_slices_clipped(batch.iter().copied(), 0.05, 5.0);
+            let lm = momo.train_batch_slices_clipped_with_momentum(
+                batch.iter().copied(),
+                0.05,
+                5.0,
+                0.0,
+                &mut state,
+            );
+            assert_eq!(lp.to_bits(), lm.to_bits(), "loss must match bit-for-bit");
+        }
+        assert_eq!(
+            plain.layers[0].weights[0], momo.layers[0].weights[0],
+            "weights must match with momentum=0"
+        );
+        assert_eq!(plain.layers[0].biases, momo.layers[0].biases);
+    }
+
+    #[test]
+    fn momentum_accelerates_descent_on_a_consistent_gradient() {
+        // On a fixed sample whose gradient points the same way every step, momentum
+        // should move the parameters further than plain SGD after the same number of
+        // identical steps (velocity accumulates). Same lr, no clipping interference.
+        let sample: Vec<(&[f64], &[f64])> = vec![(&[1.0, 2.0][..], &[3.0][..])];
+        let mut plain = linear_unit();
+        let mut momo = linear_unit();
+        let mut state = FeedForwardMomentumState::default();
+        let w0 = linear_unit().layers[0].weights[0].clone();
+        for _ in 0..20 {
+            plain.train_batch_slices_clipped(sample.iter().copied(), 0.01, 0.0);
+            momo.train_batch_slices_clipped_with_momentum(
+                sample.iter().copied(),
+                0.01,
+                0.0,
+                0.9,
+                &mut state,
+            );
+        }
+        let dist = |net: &FeedForwardNetwork| -> f64 {
+            net.layers[0].weights[0]
+                .iter()
+                .zip(w0.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        let (dp, dm) = (dist(&plain), dist(&momo));
+        assert!(
+            dm > dp * 1.5,
+            "momentum should travel further on a consistent gradient: plain={dp}, momentum={dm}"
+        );
+        assert!(momo.layers[0].weights[0].iter().all(|w| w.is_finite()));
+    }
+
+    #[test]
+    fn momentum_state_survives_a_network_reshape() {
+        // A default (empty) state initialises on first use; if reused against a
+        // differently-shaped network it must re-sync rather than panic on a stale
+        // buffer, zeroing velocity for the new shape.
+        let mut state = FeedForwardMomentumState::default();
+        let mut small = linear_unit();
+        small.train_batch_slices_clipped_with_momentum(
+            vec![(&[1.0, 2.0][..], &[1.0][..])].into_iter(),
+            0.05,
+            5.0,
+            0.9,
+            &mut state,
+        );
+        let mut big = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.1, 0.2, 0.3], vec![-0.1, 0.0, 0.1]],
+            biases: vec![0.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        // Reusing the same state against a new shape must not panic.
+        let loss = big.train_batch_slices_clipped_with_momentum(
+            vec![(&[1.0, 2.0, 3.0][..], &[0.5, -0.5][..])].into_iter(),
+            0.05,
+            5.0,
+            0.9,
+            &mut state,
+        );
+        assert!(loss.is_finite());
+    }
 }

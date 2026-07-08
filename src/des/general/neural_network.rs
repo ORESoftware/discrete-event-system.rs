@@ -1896,6 +1896,40 @@ mod tests {
     }
 
     #[test]
+    fn momentum_state_re_syncs_across_a_network_reshape() {
+        // A default (empty) state initialises on first use; reusing it against a
+        // differently-shaped network must re-sync (zeroing velocity for the new
+        // shape) rather than panic on a stale buffer. Exercises `ensure_shape`.
+        let mut state = FeedForwardMomentumState::default();
+        let mut small = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1]],
+            biases: vec![0.05],
+            activation: ActivationName::Linear,
+        }]);
+        small.train_batch_slices_clipped_with_momentum(
+            vec![(&[1.0, 2.0][..], &[1.0][..])].into_iter(),
+            0.05,
+            5.0,
+            0.9,
+            &mut state,
+        );
+        let mut big = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.1, 0.2, 0.3], vec![-0.1, 0.0, 0.1]],
+            biases: vec![0.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        // Reusing the same state against a new shape must not panic and must step.
+        let loss = big.train_batch_slices_clipped_with_momentum(
+            vec![(&[1.0, 2.0, 3.0][..], &[0.5, -0.5][..])].into_iter(),
+            0.05,
+            5.0,
+            0.9,
+            &mut state,
+        );
+        assert!(loss.is_finite());
+    }
+
+    #[test]
     fn unclipped_batch_train_is_finite_guarded_too() {
         // `train_batch_slices` (the UN-clipped batch path the soccer learner uses via
         // its overnight self-play training) must be finite-guarded as well: neither a

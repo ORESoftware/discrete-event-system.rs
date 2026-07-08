@@ -680,8 +680,13 @@ impl FeedForwardNetwork {
     }
 }
 
-/// Compat placeholder for the soccer-engine `main` per-network momentum state (empty; this des
-/// carries momentum in its own velocity buffers). Exists so `main` compiles/links against this des.
+/// Compat placeholder for the soccer-engine `main` per-network momentum state.
+///
+/// Currently EMPTY: momentum is not implemented, so no velocity is stored and
+/// threading `&mut FeedForwardMomentumState` through the trainer is a no-op. It
+/// exists only so the engine compiles/links against this des. To implement
+/// heavy-ball momentum, hold per-parameter velocity buffers here and consume
+/// them in [`FeedForwardNetwork::train_batch_slices_clipped_with_momentum`].
 #[derive(Clone, Debug, Default)]
 pub struct FeedForwardMomentumState;
 

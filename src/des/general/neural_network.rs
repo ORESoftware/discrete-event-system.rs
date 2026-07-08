@@ -128,6 +128,44 @@ pub struct FeedForwardNetwork {
     pub output_dim: usize,
 }
 
+/// Per-parameter velocity for optional momentum SGD. Kept outside
+/// [`FeedForwardNetwork`] so existing snapshots/layer configs stay pure weights.
+#[derive(Clone, Debug, Default)]
+pub struct FeedForwardMomentumState {
+    weight_velocity: Vec<Vec<Vec<f64>>>,
+    bias_velocity: Vec<Vec<f64>>,
+}
+
+impl FeedForwardMomentumState {
+    pub fn reset(&mut self) {
+        self.weight_velocity.clear();
+        self.bias_velocity.clear();
+    }
+
+    fn ensure_shape(&mut self, layers: &[DenseLayerConfig]) {
+        let shape_matches = self.weight_velocity.len() == layers.len()
+            && self.bias_velocity.len() == layers.len()
+            && layers.iter().enumerate().all(|(k, layer)| {
+                self.bias_velocity[k].len() == layer.biases.len()
+                    && self.weight_velocity[k].len() == layer.weights.len()
+                    && layer.weights.iter().enumerate().all(|(i, row)| {
+                        self.weight_velocity[k][i].len() == row.len()
+                    })
+            });
+        if shape_matches {
+            return;
+        }
+        self.weight_velocity = layers
+            .iter()
+            .map(|layer| layer.weights.iter().map(|row| vec![0.0; row.len()]).collect())
+            .collect();
+        self.bias_velocity = layers
+            .iter()
+            .map(|layer| vec![0.0; layer.biases.len()])
+            .collect();
+    }
+}
+
 fn validate_shape(layers: &[DenseLayerConfig]) {
     let mut prev_out: Option<usize> = None;
     for (k, layer) in layers.iter().enumerate() {
@@ -382,7 +420,7 @@ impl TrainableNeuralNetwork for FeedForwardNetwork {
         // step, but a non-finite gradient (e.g. an exploding update from an extreme
         // sample) now drops the step and leaves the weights untouched instead of
         // poisoning them — which would otherwise make the next `forward` assert-panic.
-        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, 0.0);
+        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, 0.0, None, 0.0);
 
         TrainSampleResult { loss, prediction }
     }
@@ -451,7 +489,53 @@ impl FeedForwardNetwork {
             loss += 0.5 * e * e;
             d_a[i] = e;
         }
-        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm)
+        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm, None, 0.0)
+    }
+
+    /// Gradient-clipped SGD with classical momentum. `momentum <= 0` is exactly
+    /// the plain clipped-SGD path; positive values use `velocity = μv - lr·g`.
+    pub fn train_sample_clipped_with_momentum(
+        &mut self,
+        input: &[f64],
+        target: &[f64],
+        learning_rate: f64,
+        max_grad_norm: f64,
+        momentum: f64,
+        state: &mut FeedForwardMomentumState,
+    ) -> ClippedTrainResult {
+        if learning_rate < 0.0 {
+            panic!("learningRate must be non-negative, got {learning_rate}");
+        }
+        if !vector_is_finite(input, self.input_dim) || !vector_is_finite(target, self.output_dim) {
+            if input.len() == self.input_dim && target.len() == self.output_dim {
+                return ClippedTrainResult {
+                    loss: f64::NAN,
+                    applied: false,
+                    clipped: false,
+                };
+            }
+        }
+        self.assert_vector(input, self.input_dim, "input");
+        self.assert_vector(target, self.output_dim, "target");
+
+        let trace = self.forward(input);
+        let prediction = &trace.activations[self.layers.len()];
+        let mut loss = 0.0;
+        let mut d_a = vec![0.0; self.output_dim];
+        for i in 0..self.output_dim {
+            let e = prediction[i] - target[i];
+            loss += 0.5 * e * e;
+            d_a[i] = e;
+        }
+        self.apply_output_error_gradient(
+            &trace,
+            d_a,
+            loss,
+            learning_rate,
+            max_grad_norm,
+            Some(state),
+            momentum,
+        )
     }
 
     /// Backprop a precomputed output gradient `d_a` (∂loss/∂output_activation)
@@ -463,32 +547,12 @@ impl FeedForwardNetwork {
     fn apply_output_error_gradient(
         &mut self,
         trace: &ForwardTrace,
-        d_a: Vec<f64>,
-        loss: f64,
-        learning_rate: f64,
-        max_grad_norm: f64,
-    ) -> ClippedTrainResult {
-        self.apply_output_error_gradient_opt(trace, d_a, loss, learning_rate, max_grad_norm, 0.0, None)
-    }
-
-    /// Core gradient application shared by the plain and momentum trainers.
-    ///
-    /// With `state = None` this is plain clipped SGD (`w ← w − learning_rate·scale·g`).
-    /// With a `state`, it applies a heavy-ball update on the *clipped* gradient:
-    ///   `v ← momentum·v + scale·g`,   `w ← w − learning_rate·v`
-    /// so `momentum == 0` reproduces the plain step exactly. Velocity persists in
-    /// `state` across calls and must be threaded per-network. On a dropped step
-    /// (non-finite gradient) neither the weights nor the velocity are touched. A
-    /// non-finite `momentum` is treated as 0.
-    fn apply_output_error_gradient_opt(
-        &mut self,
-        trace: &ForwardTrace,
         mut d_a: Vec<f64>,
         loss: f64,
         learning_rate: f64,
         max_grad_norm: f64,
+        momentum_state: Option<&mut FeedForwardMomentumState>,
         momentum: f64,
-        state: Option<&mut FeedForwardMomentumState>,
     ) -> ClippedTrainResult {
         // Accumulate per-layer gradients without mutating the network yet.
         let mut weight_grads: Vec<Vec<Vec<f64>>> = self
@@ -561,32 +625,33 @@ impl FeedForwardNetwork {
         } else {
             1.0
         };
-        match state {
-            Some(state) => {
-                // Heavy-ball momentum: accumulate the clipped gradient into a
-                // persistent velocity, then step by the velocity. Zero-initialised
-                // velocity ⇒ the first step equals plain SGD; momentum == 0 ⇒ every
-                // step equals plain SGD.
-                let momentum = if momentum.is_finite() { momentum } else { 0.0 };
-                state.ensure_shapes(&self.layers);
+        let step = learning_rate * scale;
+        let momentum = if momentum.is_finite() {
+            momentum.clamp(0.0, 0.99)
+        } else {
+            0.0
+        };
+        if momentum > 0.0 {
+            if let Some(state) = momentum_state {
+                state.ensure_shape(&self.layers);
                 for k in 0..self.layers.len() {
                     let layer = &mut self.layers[k];
-                    let w_vel = &mut state.weight_vel[k];
-                    let b_vel = &mut state.bias_vel[k];
                     for i in 0..layer.weights.len() {
                         for j in 0..layer.weights[i].len() {
-                            let v = momentum * w_vel[i][j] + scale * weight_grads[k][i][j];
-                            w_vel[i][j] = v;
-                            layer.weights[i][j] -= learning_rate * v;
+                            let previous = state.weight_velocity[k][i][j];
+                            let previous = if previous.is_finite() { previous } else { 0.0 };
+                            let velocity = momentum * previous - step * weight_grads[k][i][j];
+                            state.weight_velocity[k][i][j] = velocity;
+                            layer.weights[i][j] += velocity;
                         }
-                        let v = momentum * b_vel[i] + scale * bias_grads[k][i];
-                        b_vel[i] = v;
-                        layer.biases[i] -= learning_rate * v;
+                        let previous = state.bias_velocity[k][i];
+                        let previous = if previous.is_finite() { previous } else { 0.0 };
+                        let velocity = momentum * previous - step * bias_grads[k][i];
+                        state.bias_velocity[k][i] = velocity;
+                        layer.biases[i] += velocity;
                     }
                 }
-            }
-            None => {
-                let step = learning_rate * scale;
+            } else {
                 for k in 0..self.layers.len() {
                     let layer = &mut self.layers[k];
                     for i in 0..layer.weights.len() {
@@ -595,6 +660,16 @@ impl FeedForwardNetwork {
                         }
                         layer.biases[i] -= step * bias_grads[k][i];
                     }
+                }
+            }
+        } else {
+            for k in 0..self.layers.len() {
+                let layer = &mut self.layers[k];
+                for i in 0..layer.weights.len() {
+                    for j in 0..layer.weights[i].len() {
+                        layer.weights[i][j] -= step * weight_grads[k][i][j];
+                    }
+                    layer.biases[i] -= step * bias_grads[k][i];
                 }
             }
         }
@@ -671,7 +746,71 @@ impl FeedForwardNetwork {
             let entropy_grad = entropy_coeff * probs[i] * (probs[i].max(1e-12).ln() + entropy);
             d_a[i] = policy_grad + entropy_grad;
         }
-        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm)
+        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm, None, 0.0)
+    }
+
+    /// Momentum variant of [`Self::train_policy_gradient_sample`].
+    pub fn train_policy_gradient_sample_with_momentum(
+        &mut self,
+        input: &[f64],
+        action: usize,
+        advantage: f64,
+        entropy_coeff: f64,
+        learning_rate: f64,
+        max_grad_norm: f64,
+        momentum: f64,
+        state: &mut FeedForwardMomentumState,
+    ) -> ClippedTrainResult {
+        if learning_rate < 0.0 {
+            panic!("learningRate must be non-negative, got {learning_rate}");
+        }
+        assert!(
+            action < self.output_dim,
+            "policy action index {action} out of range for {} outputs",
+            self.output_dim
+        );
+        debug_assert_eq!(
+            self.layers.last().map(|layer| layer.activation),
+            Some(ActivationName::Linear),
+            "train_policy_gradient_sample requires a Linear output layer"
+        );
+        if !advantage.is_finite() || !vector_is_finite(input, self.input_dim) {
+            if input.len() == self.input_dim {
+                return ClippedTrainResult {
+                    loss: 0.0,
+                    applied: false,
+                    clipped: false,
+                };
+            }
+        }
+        self.assert_vector(input, self.input_dim, "input");
+
+        let trace = self.forward(input);
+        let logits = &trace.activations[self.layers.len()];
+        let probs = softmax(logits);
+        let entropy: f64 = -probs
+            .iter()
+            .map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 })
+            .sum::<f64>();
+        let log_pi_action = probs[action].max(1e-12).ln();
+        let loss = -advantage * log_pi_action - entropy_coeff * entropy;
+
+        let mut d_a = vec![0.0; self.output_dim];
+        for i in 0..self.output_dim {
+            let onehot = if i == action { 1.0 } else { 0.0 };
+            let policy_grad = advantage * (probs[i] - onehot);
+            let entropy_grad = entropy_coeff * probs[i] * (probs[i].max(1e-12).ln() + entropy);
+            d_a[i] = policy_grad + entropy_grad;
+        }
+        self.apply_output_error_gradient(
+            &trace,
+            d_a,
+            loss,
+            learning_rate,
+            max_grad_norm,
+            Some(state),
+            momentum,
+        )
     }
 
     /// Softmax distribution over the network's current outputs (logits). Returns a
@@ -705,64 +844,8 @@ impl FeedForwardNetwork {
         total / (count.max(1) as f64)
     }
 
-    /// Momentum variant of [`train_sample_clipped`]: identical finite-guard and
-    /// grad-norm clip, but applies a heavy-ball update using the velocity stored in
-    /// `state`. See [`FeedForwardNetwork::apply_output_error_gradient_opt`] for the
-    /// update rule. `momentum ∈ [0, 1)` (0 == plain SGD); a non-finite `momentum`
-    /// is treated as 0.
-    pub fn train_sample_clipped_with_momentum(
-        &mut self,
-        input: &[f64],
-        target: &[f64],
-        learning_rate: f64,
-        max_grad_norm: f64,
-        momentum: f64,
-        state: &mut FeedForwardMomentumState,
-    ) -> ClippedTrainResult {
-        if learning_rate < 0.0 {
-            panic!("learningRate must be non-negative, got {learning_rate}");
-        }
-        // Same non-finite-data guard as `train_sample_clipped`: drop the step
-        // rather than panic in `forward`; a dimension mismatch still panics.
-        if !vector_is_finite(input, self.input_dim) || !vector_is_finite(target, self.output_dim) {
-            if input.len() == self.input_dim && target.len() == self.output_dim {
-                return ClippedTrainResult {
-                    loss: f64::NAN,
-                    applied: false,
-                    clipped: false,
-                };
-            }
-        }
-        self.assert_vector(input, self.input_dim, "input");
-        self.assert_vector(target, self.output_dim, "target");
-
-        let trace = self.forward(input);
-        let prediction = &trace.activations[self.layers.len()];
-        let mut loss = 0.0;
-        let mut d_a = vec![0.0; self.output_dim];
-        for i in 0..self.output_dim {
-            let e = prediction[i] - target[i];
-            loss += 0.5 * e * e;
-            d_a[i] = e;
-        }
-        self.apply_output_error_gradient_opt(
-            &trace,
-            d_a,
-            loss,
-            learning_rate,
-            max_grad_norm,
-            momentum,
-            Some(state),
-        )
-    }
-
-    /// Mean-loss batch trainer with heavy-ball momentum — the momentum counterpart
-    /// of [`train_batch_slices_clipped`]. `state` holds the per-network velocity and
-    /// **must persist across batches**, so pass the SAME `state` on every call for a
-    /// given network (allocate one `FeedForwardMomentumState::default()` per network
-    /// and thread `&mut` it). `momentum ∈ [0, 1)`; 0 reproduces plain SGD exactly.
-    /// Non-finite samples are skipped and excluded from the reported mean, as in the
-    /// non-momentum trainer.
+    /// Momentum variant of [`Self::train_batch_slices_clipped`]. Passing
+    /// `momentum <= 0` is equivalent to plain clipped SGD.
     pub fn train_batch_slices_clipped_with_momentum<'a, I>(
         &mut self,
         samples: I,
@@ -791,52 +874,6 @@ impl FeedForwardNetwork {
             }
         }
         total / (count.max(1) as f64)
-    }
-}
-
-/// Per-network heavy-ball velocity for the momentum trainers
-/// ([`FeedForwardNetwork::train_batch_slices_clipped_with_momentum`] and
-/// [`FeedForwardNetwork::train_sample_clipped_with_momentum`]).
-///
-/// Allocate one per network (via `default()`, which starts empty) and thread the
-/// same `&mut` handle across every training call for that network — the velocity
-/// must persist for momentum to accumulate. The buffers are shaped to mirror the
-/// network's parameters and are (re)allocated lazily on first use, so a freshly
-/// `default()`-constructed state Just Works and re-syncs if the network's shape
-/// ever changes (zeroing velocity on a reshape, which is the safe choice).
-#[derive(Clone, Debug, Default)]
-pub struct FeedForwardMomentumState {
-    /// Weight velocity, shaped like [`DenseLayerConfig::weights`]
-    /// (`weight_vel[layer][out][in]`). Empty until the first momentum step.
-    weight_vel: Vec<Vec<Vec<f64>>>,
-    /// Bias velocity (`bias_vel[layer][out]`). Empty until the first momentum step.
-    bias_vel: Vec<Vec<f64>>,
-}
-
-impl FeedForwardMomentumState {
-    /// (Re)allocate the velocity buffers to match `layers` if they don't already,
-    /// zero-initialising them. A no-op once the shapes agree, so the per-step cost
-    /// is one shape comparison after the first call.
-    fn ensure_shapes(&mut self, layers: &[DenseLayerConfig]) {
-        let matches = self.bias_vel.len() == layers.len()
-            && self.weight_vel.len() == layers.len()
-            && layers.iter().enumerate().all(|(k, l)| {
-                self.bias_vel[k].len() == l.biases.len()
-                    && self.weight_vel[k].len() == l.weights.len()
-                    && self
-                        .weight_vel[k]
-                        .iter()
-                        .zip(l.weights.iter())
-                        .all(|(vr, wr)| vr.len() == wr.len())
-            });
-        if matches {
-            return;
-        }
-        self.weight_vel = layers
-            .iter()
-            .map(|l| l.weights.iter().map(|row| vec![0.0; row.len()]).collect())
-            .collect();
-        self.bias_vel = layers.iter().map(|l| vec![0.0; l.biases.len()]).collect();
     }
 }
 
@@ -1800,6 +1837,99 @@ mod tests {
     }
 
     #[test]
+    fn momentum_zero_matches_plain_clipped_sgd() {
+        let layer = DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1]],
+            biases: vec![0.05],
+            activation: ActivationName::Linear,
+        };
+        let mut plain = FeedForwardNetwork::new(vec![layer.clone()]);
+        let mut momentum = FeedForwardNetwork::new(vec![layer]);
+        let mut state = FeedForwardMomentumState::default();
+
+        let plain_result = plain.train_sample_clipped(&[0.4, -0.2], &[0.8], 0.03, 4.0);
+        let momentum_result = momentum.train_sample_clipped_with_momentum(
+            &[0.4, -0.2],
+            &[0.8],
+            0.03,
+            4.0,
+            0.0,
+            &mut state,
+        );
+
+        assert_eq!(plain_result.applied, momentum_result.applied);
+        assert_eq!(plain.layers[0].weights, momentum.layers[0].weights);
+        assert_eq!(plain.layers[0].biases, momentum.layers[0].biases);
+    }
+
+    #[test]
+    fn clipped_momentum_accumulates_velocity_across_steps() {
+        let layer = DenseLayerConfig {
+            weights: vec![vec![0.0]],
+            biases: vec![0.0],
+            activation: ActivationName::Linear,
+        };
+        let mut plain = FeedForwardNetwork::new(vec![layer.clone()]);
+        let mut accelerated = FeedForwardNetwork::new(vec![layer]);
+        let mut state = FeedForwardMomentumState::default();
+
+        for _ in 0..2 {
+            plain.train_sample_clipped(&[1.0], &[1.0], 0.1, 4.0);
+            accelerated.train_sample_clipped_with_momentum(
+                &[1.0],
+                &[1.0],
+                0.1,
+                4.0,
+                0.9,
+                &mut state,
+            );
+        }
+
+        assert!(
+            accelerated.layers[0].weights[0][0] > plain.layers[0].weights[0][0],
+            "momentum should carry the second update farther than plain SGD"
+        );
+        assert!(
+            accelerated.layers[0].biases[0] > plain.layers[0].biases[0],
+            "momentum should accumulate for biases too"
+        );
+    }
+
+    #[test]
+    fn momentum_state_re_syncs_across_a_network_reshape() {
+        // A default (empty) state initialises on first use; reusing it against a
+        // differently-shaped network must re-sync (zeroing velocity for the new
+        // shape) rather than panic on a stale buffer. Exercises `ensure_shape`.
+        let mut state = FeedForwardMomentumState::default();
+        let mut small = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1]],
+            biases: vec![0.05],
+            activation: ActivationName::Linear,
+        }]);
+        small.train_batch_slices_clipped_with_momentum(
+            vec![(&[1.0, 2.0][..], &[1.0][..])].into_iter(),
+            0.05,
+            5.0,
+            0.9,
+            &mut state,
+        );
+        let mut big = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.1, 0.2, 0.3], vec![-0.1, 0.0, 0.1]],
+            biases: vec![0.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        // Reusing the same state against a new shape must not panic and must step.
+        let loss = big.train_batch_slices_clipped_with_momentum(
+            vec![(&[1.0, 2.0, 3.0][..], &[0.5, -0.5][..])].into_iter(),
+            0.05,
+            5.0,
+            0.9,
+            &mut state,
+        );
+        assert!(loss.is_finite());
+    }
+
+    #[test]
     fn unclipped_batch_train_is_finite_guarded_too() {
         // `train_batch_slices` (the UN-clipped batch path the soccer learner uses via
         // its overnight self-play training) must be finite-guarded as well: neither a
@@ -2013,110 +2143,5 @@ mod tests {
                 sample.target[0]
             );
         }
-    }
-
-    fn linear_unit() -> FeedForwardNetwork {
-        FeedForwardNetwork::new(vec![DenseLayerConfig {
-            weights: vec![vec![0.2, -0.1]],
-            biases: vec![0.05],
-            activation: ActivationName::Linear,
-        }])
-    }
-
-    #[test]
-    fn momentum_zero_matches_plain_sgd_bit_for_bit() {
-        // With momentum == 0 the heavy-ball trainer must reproduce plain clipped SGD
-        // exactly — this is the safety property that makes the engine's default
-        // optimizer_momentum = 0.0 a true no-op change.
-        let mut plain = linear_unit();
-        let mut momo = linear_unit();
-        let mut state = FeedForwardMomentumState::default();
-        let batch: Vec<(&[f64], &[f64])> = vec![
-            (&[1.0, 2.0][..], &[1.5][..]),
-            (&[-0.5, 0.3][..], &[-0.2][..]),
-            (&[0.7, -1.1][..], &[0.9][..]),
-        ];
-        for _ in 0..50 {
-            let lp = plain.train_batch_slices_clipped(batch.iter().copied(), 0.05, 5.0);
-            let lm = momo.train_batch_slices_clipped_with_momentum(
-                batch.iter().copied(),
-                0.05,
-                5.0,
-                0.0,
-                &mut state,
-            );
-            assert_eq!(lp.to_bits(), lm.to_bits(), "loss must match bit-for-bit");
-        }
-        assert_eq!(
-            plain.layers[0].weights[0], momo.layers[0].weights[0],
-            "weights must match with momentum=0"
-        );
-        assert_eq!(plain.layers[0].biases, momo.layers[0].biases);
-    }
-
-    #[test]
-    fn momentum_accelerates_descent_on_a_consistent_gradient() {
-        // On a fixed sample whose gradient points the same way every step, momentum
-        // should move the parameters further than plain SGD after the same number of
-        // identical steps (velocity accumulates). Same lr, no clipping interference.
-        let sample: Vec<(&[f64], &[f64])> = vec![(&[1.0, 2.0][..], &[3.0][..])];
-        let mut plain = linear_unit();
-        let mut momo = linear_unit();
-        let mut state = FeedForwardMomentumState::default();
-        let w0 = linear_unit().layers[0].weights[0].clone();
-        for _ in 0..20 {
-            plain.train_batch_slices_clipped(sample.iter().copied(), 0.01, 0.0);
-            momo.train_batch_slices_clipped_with_momentum(
-                sample.iter().copied(),
-                0.01,
-                0.0,
-                0.9,
-                &mut state,
-            );
-        }
-        let dist = |net: &FeedForwardNetwork| -> f64 {
-            net.layers[0].weights[0]
-                .iter()
-                .zip(w0.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt()
-        };
-        let (dp, dm) = (dist(&plain), dist(&momo));
-        assert!(
-            dm > dp * 1.2,
-            "momentum should travel further on a consistent gradient: plain={dp}, momentum={dm}"
-        );
-        assert!(momo.layers[0].weights[0].iter().all(|w| w.is_finite()));
-    }
-
-    #[test]
-    fn momentum_state_survives_a_network_reshape() {
-        // A default (empty) state initialises on first use; if reused against a
-        // differently-shaped network it must re-sync rather than panic on a stale
-        // buffer, zeroing velocity for the new shape.
-        let mut state = FeedForwardMomentumState::default();
-        let mut small = linear_unit();
-        small.train_batch_slices_clipped_with_momentum(
-            vec![(&[1.0, 2.0][..], &[1.0][..])].into_iter(),
-            0.05,
-            5.0,
-            0.9,
-            &mut state,
-        );
-        let mut big = FeedForwardNetwork::new(vec![DenseLayerConfig {
-            weights: vec![vec![0.1, 0.2, 0.3], vec![-0.1, 0.0, 0.1]],
-            biases: vec![0.0, 0.0],
-            activation: ActivationName::Linear,
-        }]);
-        // Reusing the same state against a new shape must not panic.
-        let loss = big.train_batch_slices_clipped_with_momentum(
-            vec![(&[1.0, 2.0, 3.0][..], &[0.5, -0.5][..])].into_iter(),
-            0.05,
-            5.0,
-            0.9,
-            &mut state,
-        );
-        assert!(loss.is_finite());
     }
 }

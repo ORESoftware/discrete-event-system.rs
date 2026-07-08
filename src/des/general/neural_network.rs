@@ -656,9 +656,15 @@ impl FeedForwardNetwork {
         total / (count.max(1) as f64)
     }
 
-    /// Compat shim for the soccer-engine `main` momentum-optimizer API — delegates to
-    /// `train_batch_slices_clipped` (this des carries momentum internally). Lets the engine,
-    /// which threads a `&mut FeedForwardMomentumState`, compile+link against this des.
+    /// Compat shim for the soccer-engine `main` momentum-optimizer API.
+    ///
+    /// WARNING: momentum is NOT implemented here. `_momentum` and `_state` are
+    /// accepted and ignored, so this performs plain (momentum-free) SGD by
+    /// delegating to `train_batch_slices_clipped`. The soccer engine's default
+    /// `optimizer_momentum` is 0.0, so default runs are unaffected — but any run
+    /// configured with a nonzero momentum silently gets plain SGD, not the
+    /// heavy-ball update it asks for. To honor it, store per-parameter velocity
+    /// buffers in `FeedForwardMomentumState` and apply them here.
     pub fn train_batch_slices_clipped_with_momentum<'a, I>(
         &mut self,
         samples: I,
@@ -674,8 +680,13 @@ impl FeedForwardNetwork {
     }
 }
 
-/// Compat placeholder for the soccer-engine `main` per-network momentum state (empty; this des
-/// carries momentum in its own velocity buffers). Exists so `main` compiles/links against this des.
+/// Compat placeholder for the soccer-engine `main` per-network momentum state.
+///
+/// Currently EMPTY: momentum is not implemented, so no velocity is stored and
+/// threading `&mut FeedForwardMomentumState` through the trainer is a no-op. It
+/// exists only so the engine compiles/links against this des. To implement
+/// heavy-ball momentum, hold per-parameter velocity buffers here and consume
+/// them in [`FeedForwardNetwork::train_batch_slices_clipped_with_momentum`].
 #[derive(Clone, Debug, Default)]
 pub struct FeedForwardMomentumState;
 

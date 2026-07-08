@@ -794,15 +794,51 @@ impl FeedForwardNetwork {
     }
 }
 
-/// Compat placeholder for the soccer-engine `main` per-network momentum state.
+/// Per-network heavy-ball velocity for the momentum trainers
+/// ([`FeedForwardNetwork::train_batch_slices_clipped_with_momentum`] and
+/// [`FeedForwardNetwork::train_sample_clipped_with_momentum`]).
 ///
-/// Currently EMPTY: momentum is not implemented, so no velocity is stored and
-/// threading `&mut FeedForwardMomentumState` through the trainer is a no-op. It
-/// exists only so the engine compiles/links against this des. To implement
-/// heavy-ball momentum, hold per-parameter velocity buffers here and consume
-/// them in [`FeedForwardNetwork::train_batch_slices_clipped_with_momentum`].
+/// Allocate one per network (via `default()`, which starts empty) and thread the
+/// same `&mut` handle across every training call for that network — the velocity
+/// must persist for momentum to accumulate. The buffers are shaped to mirror the
+/// network's parameters and are (re)allocated lazily on first use, so a freshly
+/// `default()`-constructed state Just Works and re-syncs if the network's shape
+/// ever changes (zeroing velocity on a reshape, which is the safe choice).
 #[derive(Clone, Debug, Default)]
-pub struct FeedForwardMomentumState;
+pub struct FeedForwardMomentumState {
+    /// Weight velocity, shaped like [`DenseLayerConfig::weights`]
+    /// (`weight_vel[layer][out][in]`). Empty until the first momentum step.
+    weight_vel: Vec<Vec<Vec<f64>>>,
+    /// Bias velocity (`bias_vel[layer][out]`). Empty until the first momentum step.
+    bias_vel: Vec<Vec<f64>>,
+}
+
+impl FeedForwardMomentumState {
+    /// (Re)allocate the velocity buffers to match `layers` if they don't already,
+    /// zero-initialising them. A no-op once the shapes agree, so the per-step cost
+    /// is one shape comparison after the first call.
+    fn ensure_shapes(&mut self, layers: &[DenseLayerConfig]) {
+        let matches = self.bias_vel.len() == layers.len()
+            && self.weight_vel.len() == layers.len()
+            && layers.iter().enumerate().all(|(k, l)| {
+                self.bias_vel[k].len() == l.biases.len()
+                    && self.weight_vel[k].len() == l.weights.len()
+                    && self
+                        .weight_vel[k]
+                        .iter()
+                        .zip(l.weights.iter())
+                        .all(|(vr, wr)| vr.len() == wr.len())
+            });
+        if matches {
+            return;
+        }
+        self.weight_vel = layers
+            .iter()
+            .map(|l| l.weights.iter().map(|row| vec![0.0; row.len()]).collect())
+            .collect();
+        self.bias_vel = layers.iter().map(|l| vec![0.0; l.biases.len()]).collect();
+    }
+}
 
 /// Whether `v` has the expected length and every component is finite. Used by
 /// the divergence-guarded trainers to drop a step on non-finite **data** (a

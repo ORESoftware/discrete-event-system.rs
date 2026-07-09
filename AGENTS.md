@@ -33,3 +33,24 @@
   `dd-codex` project via the local AWS profile/config. Do not use Neon, Supabase,
   or any other Postgres connector for this repository's soccer-learning storage
   unless the user explicitly asks for that different database.
+
+## Command safety — STRICT (all agents MUST follow)
+
+Never run destructive or irreversible shell commands. To remove or move files,
+**always go through git** so the change is tracked and recoverable.
+
+**Blacklisted — do NOT run:**
+- `rm`, `rm -rf`, `rmdir`, `unlink` — never delete via raw `rm`.
+- raw `mv` of tracked files; truncating a tracked file with `>`.
+- `git reset --hard`, `git clean -fdx`, `git checkout -- .` / `git restore .` mass-discard.
+- `git push --force` / history rewrites on shared branches (esp. `main`).
+- `dd`, `mkfs`, `shred`, `find … -delete`, recursive `chmod -R`/`chown -R` on broad paths, fork bombs.
+
+**Whitelisted — safe, prefer these:**
+- `git rm` / `git rm --cached` — remove files through git (recoverable via history).
+- `git mv` — rename/move through git.
+- `git restore <path>` (single file), `git revert`, `git stash` — reversible.
+- Editing via the editor tools, `git add`, `git commit`, `git switch -c`.
+
+If a genuinely destructive action seems unavoidable, **STOP and ask the operator
+first** — do not improvise around this rule.

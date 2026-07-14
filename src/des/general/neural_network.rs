@@ -148,16 +148,24 @@ impl FeedForwardMomentumState {
             && layers.iter().enumerate().all(|(k, layer)| {
                 self.bias_velocity[k].len() == layer.biases.len()
                     && self.weight_velocity[k].len() == layer.weights.len()
-                    && layer.weights.iter().enumerate().all(|(i, row)| {
-                        self.weight_velocity[k][i].len() == row.len()
-                    })
+                    && layer
+                        .weights
+                        .iter()
+                        .enumerate()
+                        .all(|(i, row)| self.weight_velocity[k][i].len() == row.len())
             });
         if shape_matches {
             return;
         }
         self.weight_velocity = layers
             .iter()
-            .map(|layer| layer.weights.iter().map(|row| vec![0.0; row.len()]).collect())
+            .map(|layer| {
+                layer
+                    .weights
+                    .iter()
+                    .map(|row| vec![0.0; row.len()])
+                    .collect()
+            })
             .collect();
         self.bias_velocity = layers
             .iter()
@@ -749,6 +757,70 @@ impl FeedForwardNetwork {
         self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm, None, 0.0)
     }
 
+    /// Policy-gradient step whose softmax, entropy, and gradient are restricted
+    /// to the actions legal in the sampled state. Illegal logits receive no
+    /// probability mass and no direct output gradient.
+    pub fn train_policy_gradient_sample_masked(
+        &mut self,
+        input: &[f64],
+        action: usize,
+        legal_action_mask: &[bool],
+        advantage: f64,
+        entropy_coeff: f64,
+        learning_rate: f64,
+        max_grad_norm: f64,
+    ) -> ClippedTrainResult {
+        if learning_rate < 0.0 {
+            panic!("learningRate must be non-negative, got {learning_rate}");
+        }
+        assert_eq!(
+            legal_action_mask.len(),
+            self.output_dim,
+            "legal action mask must match policy output dimension"
+        );
+        assert!(
+            action < self.output_dim && legal_action_mask[action],
+            "sampled policy action {action} must be legal"
+        );
+        debug_assert_eq!(
+            self.layers.last().map(|layer| layer.activation),
+            Some(ActivationName::Linear),
+            "train_policy_gradient_sample_masked requires a Linear output layer"
+        );
+        if !advantage.is_finite() || !vector_is_finite(input, self.input_dim) {
+            if input.len() == self.input_dim {
+                return ClippedTrainResult {
+                    loss: 0.0,
+                    applied: false,
+                    clipped: false,
+                };
+            }
+        }
+        self.assert_vector(input, self.input_dim, "input");
+
+        let trace = self.forward(input);
+        let logits = &trace.activations[self.layers.len()];
+        let probs = masked_softmax(logits, legal_action_mask);
+        let entropy: f64 = -probs
+            .iter()
+            .map(|&p| if p > 0.0 { p * p.ln() } else { 0.0 })
+            .sum::<f64>();
+        let log_pi_action = probs[action].max(1e-12).ln();
+        let loss = -advantage * log_pi_action - entropy_coeff * entropy;
+
+        let mut d_a = vec![0.0; self.output_dim];
+        for i in 0..self.output_dim {
+            if !legal_action_mask[i] {
+                continue;
+            }
+            let onehot = if i == action { 1.0 } else { 0.0 };
+            let policy_grad = advantage * (probs[i] - onehot);
+            let entropy_grad = entropy_coeff * probs[i] * (probs[i].max(1e-12).ln() + entropy);
+            d_a[i] = policy_grad + entropy_grad;
+        }
+        self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm, None, 0.0)
+    }
+
     /// Momentum variant of [`Self::train_policy_gradient_sample`].
     pub fn train_policy_gradient_sample_with_momentum(
         &mut self,
@@ -817,6 +889,20 @@ impl FeedForwardNetwork {
     /// uniform distribution if the logits are degenerate (non-finite sum).
     pub fn action_probabilities(&self, input: &[f64]) -> NumericVector {
         softmax(&self.predict(input))
+    }
+
+    /// Softmax over only the actions legal in the current state.
+    pub fn action_probabilities_masked(
+        &self,
+        input: &[f64],
+        legal_action_mask: &[bool],
+    ) -> NumericVector {
+        assert_eq!(
+            legal_action_mask.len(),
+            self.output_dim,
+            "legal action mask must match policy output dimension"
+        );
+        masked_softmax(&self.predict(input), legal_action_mask)
     }
 
     /// Mean loss over a borrowed batch trained with [`train_sample_clipped`].
@@ -915,6 +1001,52 @@ fn softmax(logits: &[f64]) -> NumericVector {
         exps.iter().map(|&e| e / sum).collect()
     } else {
         vec![1.0 / logits.len() as f64; logits.len()]
+    }
+}
+
+fn masked_softmax(logits: &[f64], legal_action_mask: &[bool]) -> NumericVector {
+    assert_eq!(logits.len(), legal_action_mask.len());
+    let legal_count = legal_action_mask.iter().filter(|legal| **legal).count();
+    assert!(legal_count > 0, "policy legal-action mask cannot be empty");
+    let max = logits
+        .iter()
+        .zip(legal_action_mask)
+        .filter_map(|(logit, legal)| legal.then_some(*logit))
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !max.is_finite() {
+        return legal_action_mask
+            .iter()
+            .map(|legal| {
+                if *legal {
+                    1.0 / legal_count as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+    }
+    let mut exps = logits
+        .iter()
+        .zip(legal_action_mask)
+        .map(|(logit, legal)| if *legal { (*logit - max).exp() } else { 0.0 })
+        .collect::<Vec<_>>();
+    let sum = exps.iter().sum::<f64>();
+    if sum > 0.0 && sum.is_finite() {
+        for value in &mut exps {
+            *value /= sum;
+        }
+        exps
+    } else {
+        legal_action_mask
+            .iter()
+            .map(|legal| {
+                if *legal {
+                    1.0 / legal_count as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect()
     }
 }
 
@@ -1724,6 +1856,27 @@ mod tests {
         let probs = policy.action_probabilities(&state);
         let sum: f64 = probs.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9 && probs.iter().all(|p| p.is_finite()));
+    }
+
+    #[test]
+    fn masked_policy_gradient_excludes_illegal_actions_from_softmax_and_update() {
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.0], vec![8.0], vec![0.0]],
+            biases: vec![0.0, 8.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        let state = [1.0];
+        let mask = [true, false, true];
+        let before_illegal = policy.layers[0].weights[1].clone();
+        let probs = policy.action_probabilities_masked(&state, &mask);
+        assert_eq!(probs[1], 0.0);
+        assert!((probs[0] + probs[2] - 1.0).abs() < 1e-12);
+
+        let result =
+            policy.train_policy_gradient_sample_masked(&state, 0, &mask, 1.0, 0.0, 0.1, 5.0);
+        assert!(result.applied);
+        assert_eq!(policy.layers[0].weights[1], before_illegal);
+        assert!(policy.action_probabilities_masked(&state, &mask)[0] > probs[0]);
     }
 
     #[test]

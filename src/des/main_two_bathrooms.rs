@@ -33,6 +33,9 @@ pub fn run() {
     let path = out_dir.join("two-bathrooms.html");
     match std::fs::write(&path, render_two_bathrooms_html(&cfg)) {
         Ok(()) => println!("  wrote {}", path.display()),
-        Err(e) => eprintln!("[main_two_bathrooms] could not write {}: {e}", path.display()),
+        Err(e) => eprintln!(
+            "[main_two_bathrooms] could not write {}: {e}",
+            path.display()
+        ),
     }
 }

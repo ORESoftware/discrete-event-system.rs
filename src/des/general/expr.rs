@@ -901,15 +901,15 @@ mod tests {
         env.insert("n".to_string(), -4.0);
         env.insert("big".to_string(), 1000.0);
         for src in [
-            "1 / z",        // pole -> large finite
-            "z / z",        // 0/0 -> 0
-            "sqrt(n)",      // negative sqrt -> 0
-            "log(z)",       // ln(0) -> large finite negative
-            "log(n)",       // ln(-4) -> ln(4)
-            "exp(big)",     // overflow -> f64::MAX
-            "n ^ 0.5",      // (-4)^0.5 -> clamped
-            "acos(2)",      // out of domain -> acos(1)
-            "1 / (z - z)",  // 1/0 nested
+            "1 / z",       // pole -> large finite
+            "z / z",       // 0/0 -> 0
+            "sqrt(n)",     // negative sqrt -> 0
+            "log(z)",      // ln(0) -> large finite negative
+            "log(n)",      // ln(-4) -> ln(4)
+            "exp(big)",    // overflow -> f64::MAX
+            "n ^ 0.5",     // (-4)^0.5 -> clamped
+            "acos(2)",     // out of domain -> acos(1)
+            "1 / (z - z)", // 1/0 nested
         ] {
             let v = evaluate(&parse(src), &env);
             assert!(v.is_finite(), "`{src}` evaluated to non-finite {v}");

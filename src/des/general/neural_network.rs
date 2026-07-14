@@ -757,10 +757,9 @@ impl FeedForwardNetwork {
         self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm, None, 0.0)
     }
 
-    /// Masked variant of [`Self::train_policy_gradient_sample`]. Illegal actions
-    /// are excluded from the softmax normalization and receive zero policy/entropy
-    /// gradient, so policy heads learn only within the legal action simplex for
-    /// the sampled state.
+    /// Policy-gradient step whose softmax, entropy, and gradient are restricted
+    /// to the actions legal in the sampled state. Illegal logits receive no
+    /// probability mass and no direct output gradient.
     pub fn train_policy_gradient_sample_masked(
         &mut self,
         input: &[f64],
@@ -774,16 +773,14 @@ impl FeedForwardNetwork {
         if learning_rate < 0.0 {
             panic!("learningRate must be non-negative, got {learning_rate}");
         }
-        assert!(
-            action < self.output_dim,
-            "policy action index {action} out of range for {} outputs",
-            self.output_dim
-        );
         assert_eq!(
             legal_action_mask.len(),
             self.output_dim,
-            "legal action mask length {} does not match policy output dim {}",
-            legal_action_mask.len(),
+            "legal action mask must match policy output dimension"
+        );
+        assert!(
+            action < self.output_dim,
+            "policy action index {action} out of range for {} outputs",
             self.output_dim
         );
         debug_assert_eq!(
@@ -792,7 +789,6 @@ impl FeedForwardNetwork {
             "train_policy_gradient_sample_masked requires a Linear output layer"
         );
         if !legal_action_mask[action]
-            || !legal_action_mask.iter().any(|legal| *legal)
             || !advantage.is_finite()
             || !vector_is_finite(input, self.input_dim)
         {
@@ -809,19 +805,19 @@ impl FeedForwardNetwork {
         let trace = self.forward(input);
         let logits = &trace.activations[self.layers.len()];
         let probs = masked_softmax(logits, legal_action_mask);
-        let entropy: f64 = probs
+        let entropy: f64 = -probs
             .iter()
             .zip(legal_action_mask.iter())
             .map(
                 |(&p, &legal)| {
                     if legal && p > 0.0 {
-                        -p * p.ln()
+                        p * p.ln()
                     } else {
                         0.0
                     }
                 },
             )
-            .sum();
+            .sum::<f64>();
         let log_pi_action = probs[action].max(1e-12).ln();
         let loss = -advantage * log_pi_action - entropy_coeff * entropy;
 
@@ -908,20 +904,18 @@ impl FeedForwardNetwork {
         softmax(&self.predict(input))
     }
 
-    /// Softmax distribution over legal actions only. Illegal actions receive
-    /// probability zero; if the mask is empty/degenerate this falls back to the
-    /// unmasked distribution so callers still get a finite simplex.
+    /// Softmax over only the actions legal in the current state.
     pub fn action_probabilities_masked(
         &self,
         input: &[f64],
         legal_action_mask: &[bool],
     ) -> NumericVector {
-        let logits = self.predict(input);
-        if legal_action_mask.len() != logits.len() || !legal_action_mask.iter().any(|legal| *legal)
-        {
-            return softmax(&logits);
-        }
-        masked_softmax(&logits, legal_action_mask)
+        assert_eq!(
+            legal_action_mask.len(),
+            self.output_dim,
+            "legal action mask must match policy output dimension"
+        );
+        masked_softmax(&self.predict(input), legal_action_mask)
     }
 
     /// Mean loss over a borrowed batch trained with [`train_sample_clipped`].
@@ -1024,40 +1018,47 @@ fn softmax(logits: &[f64]) -> NumericVector {
 }
 
 fn masked_softmax(logits: &[f64], legal_action_mask: &[bool]) -> NumericVector {
-    if logits.is_empty()
-        || legal_action_mask.len() != logits.len()
-        || !legal_action_mask.iter().any(|legal| *legal)
-    {
-        return softmax(logits);
-    }
+    assert_eq!(logits.len(), legal_action_mask.len());
+    let legal_count = legal_action_mask.iter().filter(|legal| **legal).count();
+    assert!(legal_count > 0, "policy legal-action mask cannot be empty");
     let max = logits
         .iter()
-        .zip(legal_action_mask.iter())
-        .filter_map(|(&logit, &legal)| legal.then_some(logit))
+        .zip(legal_action_mask)
+        .filter_map(|(logit, legal)| legal.then_some(*logit))
         .fold(f64::NEG_INFINITY, f64::max);
     if !max.is_finite() {
-        let legal_count = legal_action_mask.iter().filter(|legal| **legal).count() as f64;
         return legal_action_mask
             .iter()
-            .map(|legal| if *legal { 1.0 / legal_count } else { 0.0 })
+            .map(|legal| {
+                if *legal {
+                    1.0 / legal_count as f64
+                } else {
+                    0.0
+                }
+            })
             .collect();
     }
-    let mut exps = vec![0.0; logits.len()];
-    let mut sum = 0.0;
-    for (i, (&logit, &legal)) in logits.iter().zip(legal_action_mask.iter()).enumerate() {
-        if legal {
-            let exp = (logit - max).exp();
-            exps[i] = exp;
-            sum += exp;
-        }
-    }
+    let mut exps = logits
+        .iter()
+        .zip(legal_action_mask)
+        .map(|(logit, legal)| if *legal { (*logit - max).exp() } else { 0.0 })
+        .collect::<Vec<_>>();
+    let sum = exps.iter().sum::<f64>();
     if sum > 0.0 && sum.is_finite() {
-        exps.iter().map(|&e| e / sum).collect()
+        for value in &mut exps {
+            *value /= sum;
+        }
+        exps
     } else {
-        let legal_count = legal_action_mask.iter().filter(|legal| **legal).count() as f64;
         legal_action_mask
             .iter()
-            .map(|legal| if *legal { 1.0 / legal_count } else { 0.0 })
+            .map(|legal| {
+                if *legal {
+                    1.0 / legal_count as f64
+                } else {
+                    0.0
+                }
+            })
             .collect()
     }
 }
@@ -1871,6 +1872,31 @@ mod tests {
     }
 
     #[test]
+    fn masked_policy_gradient_excludes_illegal_actions_from_softmax_and_update() {
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.0], vec![8.0], vec![0.0]],
+            biases: vec![0.0, 8.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        let state = [1.0];
+        let mask = [true, false, true];
+        let before_illegal = policy.layers[0].weights[1].clone();
+        let probs = policy.action_probabilities_masked(&state, &mask);
+        assert_eq!(probs[1], 0.0);
+        assert!((probs[0] + probs[2] - 1.0).abs() < 1e-12);
+
+        let result =
+            policy.train_policy_gradient_sample_masked(&state, 0, &mask, 1.0, 0.0, 0.1, 5.0);
+        assert!(result.applied);
+        assert_eq!(policy.layers[0].weights[1], before_illegal);
+        assert!(policy.action_probabilities_masked(&state, &mask)[0] > probs[0]);
+
+        let skipped =
+            policy.train_policy_gradient_sample_masked(&state, 1, &mask, 1.0, 0.0, 0.1, 5.0);
+        assert!(!skipped.applied, "illegal sampled action should be skipped");
+    }
+
+    #[test]
     fn policy_gradient_negative_advantage_lowers_probability() {
         // A negative advantage on an action should push probability away from it.
         let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
@@ -1888,32 +1914,6 @@ mod tests {
             after < before - 0.15,
             "penalised action prob should fall: before={before}, after={after}"
         );
-    }
-
-    #[test]
-    fn masked_policy_gradient_updates_only_legal_action_simplex() {
-        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
-            weights: vec![vec![0.0], vec![0.0], vec![0.0]],
-            biases: vec![0.0, 0.0, 0.0],
-            activation: ActivationName::Linear,
-        }]);
-        let state = [1.0];
-        let mask = [true, false, true];
-        let before = policy.action_probabilities_masked(&state, &mask);
-        assert_eq!(before[1], 0.0, "illegal action starts at zero probability");
-        for _ in 0..120 {
-            let r =
-                policy.train_policy_gradient_sample_masked(&state, 2, &mask, 1.0, 0.0, 0.1, 5.0);
-            assert!(r.applied, "legal masked policy step should apply");
-        }
-        let after = policy.action_probabilities_masked(&state, &mask);
-        assert_eq!(after[1], 0.0, "illegal action remains excluded");
-        assert!(after[2] > before[2] + 0.2);
-        assert!((after.iter().sum::<f64>() - 1.0).abs() < 1e-9);
-
-        let skipped =
-            policy.train_policy_gradient_sample_masked(&state, 1, &mask, 1.0, 0.0, 0.1, 5.0);
-        assert!(!skipped.applied, "illegal sampled action should be skipped");
     }
 
     #[test]

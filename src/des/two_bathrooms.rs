@@ -497,7 +497,14 @@ fn build_animation(cfg: &BathroomConfig) -> Animation {
             let occ_now = stations.iter().filter(|s| !s.is_free()).count();
             chart_t.push(t);
             chart_occ.push(occ_now as f64);
-            frames.push(render_frame(&stations, &views, &static_blocks, t, tick, occ_now));
+            frames.push(render_frame(
+                &stations,
+                &views,
+                &static_blocks,
+                t,
+                tick,
+                occ_now,
+            ));
             tick += 1.0;
         }
         t += dt;

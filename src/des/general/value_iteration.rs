@@ -176,6 +176,17 @@ impl ValueIterationStation {
     /// `validate_probs` is set and an action's outcome probabilities do not sum
     /// to 1 (invariant violation → `throw` in TS).
     pub fn new(spec: MDPSpec, opts: VIOptions) -> Self {
+        // Hardening: an unvalidated discount silently poisons the result — a
+        // `gamma >= 1` on any recurrent (non-terminal-cycle) MDP diverges the
+        // Bellman backup toward ±∞, so the fixed point is never reached, the run
+        // burns all `max_iter` sweeps, and it returns an ∞-poisoned `V` with only
+        // a warning. Reject a non-finite / out-of-range discount up front, in the
+        // same fail-fast spirit as the `validate_probs` invariant below.
+        assert!(
+            opts.gamma.is_finite() && (0.0..=1.0).contains(&opts.gamma),
+            "value iteration: discount gamma must be finite and in [0, 1], got {}",
+            opts.gamma
+        );
         let num_states = spec.num_states;
         let mut transitions: Vec<Vec<Vec<Outcome>>> = Vec::with_capacity(num_states);
         let mut a_count: Vec<usize> = Vec::with_capacity(num_states);

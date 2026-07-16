@@ -179,6 +179,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "discount gamma must be finite and in [0, 1]")]
+    fn rejects_out_of_range_discount() {
+        let _ = value_iteration(VIOptions {
+            gamma: 1.5,
+            ..Default::default()
+        });
+    }
+
+    #[test]
     fn converges_and_policy_well_formed() {
         let res = value_iteration(VIOptions::default());
         assert_eq!(res.v.len(), N_STATES);

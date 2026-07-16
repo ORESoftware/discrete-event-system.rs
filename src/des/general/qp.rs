@@ -557,11 +557,75 @@ fn qp_certificate(
     ))
 }
 
+/// A `NumericalError` result with an explanatory message and no primal point —
+/// the honest outcome when this engine cannot solve the model as posed
+/// (non-finite data, or more constraints than the enumeration can represent).
+fn qp_numerical_error(message: &str) -> QPSolution {
+    QPSolution {
+        status: QPStatus::NumericalError,
+        x: Vec::new(),
+        objective: f64::NAN,
+        dual_ub: Vec::new(),
+        dual_eq: Vec::new(),
+        dual_lower_bounds: Vec::new(),
+        dual_upper_bounds: Vec::new(),
+        reduced_gradient: Vec::new(),
+        active_ub_rows: Vec::new(),
+        active_lower_bounds: Vec::new(),
+        active_upper_bounds: Vec::new(),
+        iterations: 0,
+        solver: "internal-active-set-enumeration".to_string(),
+        message: Some(message.to_string()),
+    }
+}
+
+/// True iff every numeric entry of the model (Q, c, the A/b rows, and any finite
+/// bound) is finite. A NaN/∞ leaking in from upstream can never yield a valid
+/// optimum; detecting it lets the solver report `NumericalError` instead of
+/// silently returning "infeasible" (which a caller could misread as "the model
+/// has no solution" rather than "the model is malformed").
+fn qp_data_all_finite(p: &QuadraticProgram) -> bool {
+    let all_finite = |xs: &[f64]| xs.iter().all(|v| v.is_finite());
+    if !all_finite(&p.c) || !p.q.iter().all(|row| all_finite(row)) {
+        return false;
+    }
+    for m in [p.a_ub.as_ref(), p.a_eq.as_ref()].into_iter().flatten() {
+        if !m.iter().all(|row| all_finite(row)) {
+            return false;
+        }
+    }
+    for v in [p.b_ub.as_ref(), p.b_eq.as_ref()].into_iter().flatten() {
+        if !all_finite(v) {
+            return false;
+        }
+    }
+    for bnds in [p.lb.as_ref(), p.ub.as_ref()].into_iter().flatten() {
+        if bnds.iter().flatten().any(|v| !v.is_finite()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Solve a small dense convex QP by active-set enumeration.
 pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution {
     validate_qp(p);
+    // Hardening: non-finite problem data can never produce a valid optimum and
+    // would otherwise be silently misreported as "infeasible" — fail honestly.
+    if !qp_data_all_finite(p) {
+        return qp_numerical_error("non-finite problem data (NaN/inf in Q, c, A, b, or a bound)");
+    }
     let candidates = candidate_constraints(p);
     let n = p.c.len();
+    // Hardening: the enumeration below iterates `0 .. 1<<candidates.len()`. A
+    // shift of >= 64 overflows `1usize` (a debug-build panic; a silent wrap that
+    // enumerates almost nothing in release), and anything near that is far too
+    // large to enumerate anyway. Bail with a clear status instead of crashing.
+    if candidates.len() >= 63 {
+        return qp_numerical_error(
+            "too many inequality/bound constraints for active-set enumeration (>= 63)",
+        );
+    }
     let mut best_x = Vec::new();
     let mut best_obj = f64::INFINITY;
     let mut best_active = Vec::new();

@@ -69,6 +69,14 @@ pub fn build_transition_table() -> Vec<Vec<Vec<Outcome>>> {
 
 pub fn value_iteration(opts: VIOptions) -> VIResult {
     let gamma = opts.gamma;
+    // Hardening: reject a non-finite / out-of-range discount before it silently
+    // diverges the Bellman backup to ±∞ (γ ≥ 1 on this recurrent MDP never
+    // reaches the fixed point, burns all `max_iter` sweeps, and returns an
+    // ∞-poisoned value function with only a warning).
+    assert!(
+        gamma.is_finite() && (0.0..=1.0).contains(&gamma),
+        "mdp value iteration: discount gamma must be finite and in [0, 1], got {gamma}"
+    );
     let tol = opts.tol;
     let max_iter = opts.max_iter;
 

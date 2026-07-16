@@ -1597,6 +1597,59 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_data_reports_numerical_error() {
+        // A NaN in `c` is malformed data, not an infeasible model: the solver
+        // must say so (NumericalError), never silently "optimal"/"infeasible".
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![f64::NAN, -1.0],
+            lb: Some(vec![Some(-1.0), Some(-1.0)]),
+            ub: Some(vec![Some(1.0), Some(1.0)]),
+            ..Default::default()
+        };
+        let sol = solve_qp_active_set(&qp, QPOptions::default());
+        assert_eq!(sol.status, QPStatus::NumericalError, "{sol:?}");
+        assert!(sol.x.is_empty());
+    }
+
+    #[test]
+    fn oversize_constraint_count_reports_numerical_error_without_panic() {
+        // 70 inequality rows => 70 active-set candidates. `1usize << 70` would
+        // overflow the enumeration shift (debug panic / release wrap); the guard
+        // must return NumericalError cleanly instead of crashing.
+        let rows = 70usize;
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0]],
+            c: vec![0.0],
+            a_ub: Some(vec![vec![1.0]; rows]),
+            b_ub: Some(vec![1.0; rows]),
+            lb: Some(vec![None]),
+            ub: Some(vec![None]),
+            ..Default::default()
+        };
+        let sol = solve_qp_active_set(&qp, QPOptions::default());
+        assert_eq!(sol.status, QPStatus::NumericalError, "{sol:?}");
+    }
+
+    #[test]
+    fn omitted_lower_bound_defaults_to_zero() {
+        // Pins the documented nonnegativity default: min of x^2 + 6x is x=-3, but
+        // with no `lb` the default lb=0 restricts the solver to x >= 0 => x=0.
+        // Callers wanting a free variable must pass an explicit lb of None.
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0]],
+            c: vec![6.0],
+            ..Default::default()
+        };
+        let sol = solve_qp_active_set(&qp, QPOptions::default());
+        assert_eq!(sol.status, QPStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.x[0] - 0.0).abs() < 1e-8,
+            "default lb=0 should pin x at 0: {sol:?}"
+        );
+    }
+
+    #[test]
     fn solves_bounded_mixed_integer_qp() {
         // min (x - 1.4)^2 + (y - 0.6)^2, x integer, x + y >= 1.5.
         // Continuous optimum has fractional x; bounded MIQP chooses x=1,y=0.6.

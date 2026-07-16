@@ -610,6 +610,12 @@ fn qp_data_all_finite(p: &QuadraticProgram) -> bool {
 /// Solve a small dense convex QP by active-set enumeration.
 pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution {
     validate_qp(p);
+    if !opts.tol.is_finite() || opts.tol <= 0.0 {
+        return qp_numerical_error("QP tolerance must be finite and greater than zero");
+    }
+    if opts.max_active_sets == 0 {
+        return qp_numerical_error("QP max_active_sets must be greater than zero");
+    }
     // Hardening: non-finite problem data can never produce a valid optimum and
     // would otherwise be silently misreported as "infeasible" — fail honestly.
     if !qp_data_all_finite(p) {
@@ -617,14 +623,19 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
     }
     let candidates = candidate_constraints(p);
     let n = p.c.len();
-    // Hardening: the enumeration below iterates `0 .. 1<<candidates.len()`. A
-    // shift of >= 64 overflows `1usize` (a debug-build panic; a silent wrap that
-    // enumerates almost nothing in release), and anything near that is far too
-    // large to enumerate anyway. Bail with a clear status instead of crashing.
-    if candidates.len() >= 63 {
+    let Some(total_active_sets) = u32::try_from(candidates.len())
+        .ok()
+        .and_then(|shift| 1usize.checked_shl(shift))
+    else {
         return qp_numerical_error(
-            "too many inequality/bound constraints for active-set enumeration (>= 63)",
+            "too many inequality/bound constraints for active-set enumeration",
         );
+    };
+    if total_active_sets > opts.max_active_sets {
+        return qp_numerical_error(&format!(
+            "active-set search requires {total_active_sets} enumerations, exceeding max_active_sets={}",
+            opts.max_active_sets
+        ));
     }
     let mut best_x = Vec::new();
     let mut best_obj = f64::INFINITY;
@@ -632,26 +643,8 @@ pub fn solve_qp_active_set(p: &QuadraticProgram, opts: QPOptions) -> QPSolution 
     let mut best_certificate: Option<QPCertificate> = None;
     let mut iterations = 0usize;
 
-    for mask in 0usize..(1usize << candidates.len()) {
+    for mask in 0usize..total_active_sets {
         iterations += 1;
-        if iterations > opts.max_active_sets {
-            return QPSolution {
-                status: QPStatus::NumericalError,
-                x: best_x,
-                objective: best_obj,
-                dual_ub: Vec::new(),
-                dual_eq: Vec::new(),
-                dual_lower_bounds: Vec::new(),
-                dual_upper_bounds: Vec::new(),
-                reduced_gradient: Vec::new(),
-                active_ub_rows: Vec::new(),
-                active_lower_bounds: Vec::new(),
-                active_upper_bounds: Vec::new(),
-                iterations,
-                solver: "internal-active-set-enumeration".to_string(),
-                message: Some("active-set enumeration limit reached".to_string()),
-            };
-        }
         let mut active = Vec::new();
         for (i, &kind) in candidates.iter().enumerate() {
             if (mask & (1usize << i)) != 0 {
@@ -1594,6 +1587,116 @@ mod tests {
         assert!((sol.x[0] - 0.0).abs() < 1e-8, "{sol:?}");
         assert!((sol.x[1] - 1.0).abs() < 1e-8, "{sol:?}");
         assert!((sol.objective + 4.0).abs() < 1e-8, "{sol:?}");
+    }
+
+    #[test]
+    fn non_finite_data_reports_numerical_error() {
+        // A NaN in `c` is malformed data, not an infeasible model: the solver
+        // must say so (NumericalError), never silently "optimal"/"infeasible".
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0, 0.0], vec![0.0, 2.0]],
+            c: vec![f64::NAN, -1.0],
+            lb: Some(vec![Some(-1.0), Some(-1.0)]),
+            ub: Some(vec![Some(1.0), Some(1.0)]),
+            ..Default::default()
+        };
+        let sol = solve_qp_active_set(&qp, QPOptions::default());
+        assert_eq!(sol.status, QPStatus::NumericalError, "{sol:?}");
+        assert!(sol.x.is_empty());
+    }
+
+    #[test]
+    fn oversize_constraint_count_reports_numerical_error_without_panic() {
+        // 70 inequality rows => 70 active-set candidates. `1usize << 70` would
+        // overflow the enumeration shift (debug panic / release wrap); the guard
+        // must return NumericalError cleanly instead of crashing.
+        let rows = 70usize;
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0]],
+            c: vec![0.0],
+            a_ub: Some(vec![vec![1.0]; rows]),
+            b_ub: Some(vec![1.0; rows]),
+            lb: Some(vec![None]),
+            ub: Some(vec![None]),
+            ..Default::default()
+        };
+        let sol = solve_qp_active_set(&qp, QPOptions::default());
+        assert_eq!(sol.status, QPStatus::NumericalError, "{sol:?}");
+    }
+
+    #[test]
+    fn invalid_solver_options_report_numerical_error_before_enumeration() {
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0]],
+            c: vec![-2.0],
+            ..Default::default()
+        };
+        for opts in [
+            QPOptions {
+                tol: f64::NAN,
+                ..Default::default()
+            },
+            QPOptions {
+                tol: 0.0,
+                ..Default::default()
+            },
+            QPOptions {
+                max_active_sets: 0,
+                ..Default::default()
+            },
+        ] {
+            let sol = solve_qp_active_set(&qp, opts);
+            assert_eq!(sol.status, QPStatus::NumericalError, "{sol:?}");
+            assert_eq!(sol.iterations, 0, "{sol:?}");
+            assert!(sol.x.is_empty(), "{sol:?}");
+        }
+    }
+
+    #[test]
+    fn enumeration_limit_is_rejected_before_partial_search() {
+        let rows = 8usize;
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0]],
+            c: vec![0.0],
+            a_ub: Some(vec![vec![1.0]; rows]),
+            b_ub: Some(vec![1.0; rows]),
+            lb: Some(vec![None]),
+            ub: Some(vec![None]),
+            ..Default::default()
+        };
+        let sol = solve_qp_active_set(
+            &qp,
+            QPOptions {
+                max_active_sets: 100,
+                ..Default::default()
+            },
+        );
+        assert_eq!(sol.status, QPStatus::NumericalError, "{sol:?}");
+        assert_eq!(sol.iterations, 0, "{sol:?}");
+        assert!(
+            sol.message
+                .as_deref()
+                .is_some_and(|message| message.contains("requires 256 enumerations")),
+            "{sol:?}"
+        );
+    }
+
+    #[test]
+    fn omitted_lower_bound_defaults_to_zero() {
+        // Pins the documented nonnegativity default: min of x^2 + 6x is x=-3, but
+        // with no `lb` the default lb=0 restricts the solver to x >= 0 => x=0.
+        // Callers wanting a free variable must pass an explicit lb of None.
+        let qp = QuadraticProgram {
+            q: vec![vec![2.0]],
+            c: vec![6.0],
+            ..Default::default()
+        };
+        let sol = solve_qp_active_set(&qp, QPOptions::default());
+        assert_eq!(sol.status, QPStatus::Optimal, "{sol:?}");
+        assert!(
+            (sol.x[0] - 0.0).abs() < 1e-8,
+            "default lb=0 should pin x at 0: {sol:?}"
+        );
     }
 
     #[test]

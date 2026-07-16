@@ -740,7 +740,14 @@ mod tests {
         for _ in 0..5 {
             let _ = mpc.control_with_obstacles(state, &[target], &obstacles);
         }
-        let iters = 2000;
+        // Debug tests run alongside the rest of the suite and carry bounds/
+        // overflow checks, so use a smaller sample and a debug-appropriate
+        // ceiling. Release builds retain the tighter performance gate.
+        let (iters, max_per_solve) = if cfg!(debug_assertions) {
+            (200, 10.0e-3)
+        } else {
+            (2000, 2.0e-3)
+        };
         let start = std::time::Instant::now();
         let mut acc = 0.0;
         for _ in 0..iters {
@@ -753,12 +760,16 @@ mod tests {
             per * 1e6,
             cfg.horizon
         );
-        // Generously bounded so it is not flaky, but proves we are far under the
-        // ~1-2 ms/player a 10-20 ms whole-tick budget would allow.
         assert!(
-            per < 2.0e-3,
-            "single field-aware solve took {:.3} ms — too slow",
-            per * 1e3
+            per < max_per_solve,
+            "single field-aware solve took {:.3} ms — exceeds {:.1} ms {} budget",
+            per * 1e3,
+            max_per_solve * 1e3,
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
         );
     }
 

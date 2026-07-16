@@ -176,6 +176,30 @@ impl ValueIterationStation {
     /// `validate_probs` is set and an action's outcome probabilities do not sum
     /// to 1 (invariant violation → `throw` in TS).
     pub fn new(spec: MDPSpec, opts: VIOptions) -> Self {
+        assert!(
+            opts.gamma.is_finite() && (0.0..=1.0).contains(&opts.gamma),
+            "value iteration: discount gamma must be finite and in [0, 1], got {}",
+            opts.gamma
+        );
+        assert!(
+            opts.tol.is_finite() && opts.tol > 0.0,
+            "value iteration: convergence tolerance must be finite and > 0, got {}",
+            opts.tol
+        );
+        assert!(
+            opts.max_iter > 0,
+            "value iteration: max_iter must be greater than zero"
+        );
+        assert!(
+            opts.prob_tol.is_finite() && opts.prob_tol >= 0.0,
+            "value iteration: probability tolerance must be finite and >= 0, got {}",
+            opts.prob_tol
+        );
+        assert!(
+            opts.tie_break_eps.is_finite() && opts.tie_break_eps >= 0.0,
+            "value iteration: tie-break epsilon must be finite and >= 0, got {}",
+            opts.tie_break_eps
+        );
         let num_states = spec.num_states;
         let mut transitions: Vec<Vec<Vec<Outcome>>> = Vec::with_capacity(num_states);
         let mut a_count: Vec<usize> = Vec::with_capacity(num_states);
@@ -191,6 +215,23 @@ impl ValueIterationStation {
             let mut per_action: Vec<Vec<Outcome>> = Vec::with_capacity(n);
             for a in 0..n {
                 let ol = (spec.outcomes)(s, a);
+                for (outcome_index, outcome) in ol.iter().enumerate() {
+                    assert!(
+                        outcome.prob.is_finite() && (0.0..=1.0).contains(&outcome.prob),
+                        "outcomes({s}, {a})[{outcome_index}] probability must be finite and in [0, 1], got {}",
+                        outcome.prob
+                    );
+                    assert!(
+                        outcome.reward.is_finite(),
+                        "outcomes({s}, {a})[{outcome_index}] reward must be finite, got {}",
+                        outcome.reward
+                    );
+                    assert!(
+                        outcome.next_state < num_states,
+                        "outcomes({s}, {a})[{outcome_index}] next_state {} is outside 0..{num_states}",
+                        outcome.next_state
+                    );
+                }
                 if opts.validate_probs && !ol.is_empty() {
                     let total: f64 = ol.iter().map(|o| o.prob).sum();
                     if (total - 1.0).abs() > opts.prob_tol {
@@ -253,7 +294,12 @@ impl ValueIterationStation {
         let mut v = vec![0.0_f64; self.spec.num_states];
         for s in 0..self.spec.num_states {
             if self.is_terminal(s) {
-                v[s] = self.terminal_reward(s);
+                let reward = self.terminal_reward(s);
+                assert!(
+                    reward.is_finite(),
+                    "value iteration: terminal reward for state {s} must be finite, got {reward}"
+                );
+                v[s] = reward;
             }
         }
         v
@@ -443,6 +489,18 @@ pub fn q_values_all(spec: &MDPSpec, v: &[f64], s: usize, gamma: f64) -> Vec<(usi
 mod tests {
     use super::*;
 
+    fn one_state_spec(outcomes: Vec<Outcome>) -> MDPSpec {
+        MDPSpec {
+            num_states: 1,
+            num_actions: Box::new(|_s| 1),
+            outcomes: Box::new(move |_s, _a| outcomes.clone()),
+            is_terminal: None,
+            terminal_reward: None,
+            state_label: None,
+            action_label: None,
+        }
+    }
+
     /// Two independent self-loop states: V(s) = r(s) / (1 - γ).
     /// With r = [1, 2], γ = 0.9  →  V = [10, 20].
     #[test]
@@ -470,6 +528,161 @@ mod tests {
         let res = value_iteration(spec, opts);
         assert!((res.v[0] - 10.0).abs() < 1e-6, "V[0]={}", res.v[0]);
         assert!((res.v[1] - 20.0).abs() < 1e-6, "V[1]={}", res.v[1]);
+    }
+
+    /// A discount outside [0, 1] (here γ = 1.5) would silently diverge the
+    /// Bellman backup toward ∞ on a recurrent MDP; the construction guard must
+    /// reject it up front rather than return an ∞-poisoned value function.
+    #[test]
+    #[should_panic(expected = "discount gamma must be finite and in [0, 1]")]
+    fn rejects_out_of_range_discount() {
+        let spec = MDPSpec {
+            num_states: 1,
+            num_actions: Box::new(|_s| 1),
+            outcomes: Box::new(|s, _a| {
+                vec![Outcome {
+                    prob: 1.0,
+                    reward: 1.0,
+                    next_state: s,
+                }]
+            }),
+            is_terminal: None,
+            terminal_reward: None,
+            state_label: None,
+            action_label: None,
+        };
+        let _ = value_iteration(
+            spec,
+            VIOptions {
+                gamma: 1.5,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "convergence tolerance must be finite and > 0")]
+    fn rejects_zero_convergence_tolerance() {
+        let _ = value_iteration(
+            one_state_spec(vec![Outcome {
+                prob: 1.0,
+                reward: 0.0,
+                next_state: 0,
+            }]),
+            VIOptions {
+                tol: 0.0,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "max_iter must be greater than zero")]
+    fn rejects_zero_iteration_budget() {
+        let _ = value_iteration(
+            one_state_spec(vec![Outcome {
+                prob: 1.0,
+                reward: 0.0,
+                next_state: 0,
+            }]),
+            VIOptions {
+                max_iter: 0,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "probability tolerance must be finite and >= 0")]
+    fn rejects_invalid_probability_tolerance() {
+        let _ = value_iteration(
+            one_state_spec(vec![Outcome {
+                prob: 1.0,
+                reward: 0.0,
+                next_state: 0,
+            }]),
+            VIOptions {
+                prob_tol: f64::NAN,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "tie-break epsilon must be finite and >= 0")]
+    fn rejects_negative_tie_break_epsilon() {
+        let _ = value_iteration(
+            one_state_spec(vec![Outcome {
+                prob: 1.0,
+                reward: 0.0,
+                next_state: 0,
+            }]),
+            VIOptions {
+                tie_break_eps: -1.0,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "probability must be finite and in [0, 1]")]
+    fn rejects_negative_transition_probability_even_when_sum_is_one() {
+        let _ = value_iteration(
+            one_state_spec(vec![
+                Outcome {
+                    prob: -0.25,
+                    reward: 0.0,
+                    next_state: 0,
+                },
+                Outcome {
+                    prob: 1.25,
+                    reward: 0.0,
+                    next_state: 0,
+                },
+            ]),
+            VIOptions::default(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "reward must be finite")]
+    fn rejects_non_finite_transition_reward() {
+        let _ = value_iteration(
+            one_state_spec(vec![Outcome {
+                prob: 1.0,
+                reward: f64::NAN,
+                next_state: 0,
+            }]),
+            VIOptions::default(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "next_state 1 is outside 0..1")]
+    fn rejects_out_of_range_transition_state_during_table_build() {
+        let _ = value_iteration(
+            one_state_spec(vec![Outcome {
+                prob: 1.0,
+                reward: 0.0,
+                next_state: 1,
+            }]),
+            VIOptions::default(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "terminal reward for state 0 must be finite")]
+    fn rejects_non_finite_terminal_reward() {
+        let spec = MDPSpec {
+            num_states: 1,
+            num_actions: Box::new(|_s| 0),
+            outcomes: Box::new(|_s, _a| Vec::new()),
+            is_terminal: Some(Box::new(|_s| true)),
+            terminal_reward: Some(Box::new(|_s| f64::INFINITY)),
+            state_label: None,
+            action_label: None,
+        };
+        let _ = value_iteration(spec, VIOptions::default());
     }
 
     /// State 0 chooses between a zero-reward self-loop (action 0) and moving to

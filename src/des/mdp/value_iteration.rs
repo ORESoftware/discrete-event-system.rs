@@ -69,8 +69,20 @@ pub fn build_transition_table() -> Vec<Vec<Vec<Outcome>>> {
 
 pub fn value_iteration(opts: VIOptions) -> VIResult {
     let gamma = opts.gamma;
+    assert!(
+        gamma.is_finite() && (0.0..=1.0).contains(&gamma),
+        "mdp value iteration: discount gamma must be finite and in [0, 1], got {gamma}"
+    );
     let tol = opts.tol;
     let max_iter = opts.max_iter;
+    assert!(
+        tol.is_finite() && tol > 0.0,
+        "mdp value iteration: convergence tolerance must be finite and > 0, got {tol}"
+    );
+    assert!(
+        max_iter > 0,
+        "mdp value iteration: max_iter must be greater than zero"
+    );
 
     let t = build_transition_table();
     let mut v = vec![0.0_f64; N_STATES];
@@ -168,6 +180,33 @@ mod tests {
         for per_action in &t {
             assert_eq!(per_action.len(), N_ACTIONS);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "discount gamma must be finite and in [0, 1]")]
+    fn rejects_out_of_range_discount() {
+        let _ = value_iteration(VIOptions {
+            gamma: 1.5,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "convergence tolerance must be finite and > 0")]
+    fn rejects_non_finite_convergence_tolerance() {
+        let _ = value_iteration(VIOptions {
+            tol: f64::NAN,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "max_iter must be greater than zero")]
+    fn rejects_zero_iteration_budget() {
+        let _ = value_iteration(VIOptions {
+            max_iter: 0,
+            ..Default::default()
+        });
     }
 
     #[test]

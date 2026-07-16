@@ -3692,11 +3692,10 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     let t0 = Instant::now();
     let n = p.c.len();
     let maximize = matches!(p.sense, Sense::Max);
-    let q: Vec<f64> = p
-        .c
-        .iter()
-        .map(|&ci| if maximize { -ci } else { ci })
-        .collect();
+    let q: Vec<f64> =
+        p.c.iter()
+            .map(|&ci| if maximize { -ci } else { ci })
+            .collect();
     // Equalities first (ZeroCone), then inequalities + bounds (NonnegativeCone).
     let mut a_rows: Vec<Vec<f64>> = Vec::new();
     let mut b: Vec<f64> = Vec::new();
@@ -3810,7 +3809,11 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
 }
 
 /// Convert dense constraint rows to a Clarabel CSC matrix (column-major).
-fn lp_dense_rows_to_csc(rows: &[Vec<f64>], m: usize, n: usize) -> clarabel::algebra::CscMatrix<f64> {
+fn lp_dense_rows_to_csc(
+    rows: &[Vec<f64>],
+    m: usize,
+    n: usize,
+) -> clarabel::algebra::CscMatrix<f64> {
     let mut colptr = vec![0usize; n + 1];
     for row in rows {
         for (j, slot) in colptr.iter_mut().enumerate().skip(1).take(n) {

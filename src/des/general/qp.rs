@@ -336,6 +336,14 @@ fn dot(row: &[f64], x: &[f64]) -> f64 {
     row.iter().zip(x).map(|(a, xi)| a * xi).sum()
 }
 
+/// Effective per-variable bounds. **Default convention:** when `p.lb` is
+/// `None`, every variable takes a lower bound of `0` (the standard LP/QP
+/// nonnegativity default); when `p.ub` is `None`, variables are unbounded
+/// above. A model needing a *free* (possibly-negative, unbounded) variable must
+/// therefore pass an explicit `lb`/`ub` of `Some(vec![None; n])` — relying on
+/// the default silently restricts the feasible set to `x >= 0`, which is a
+/// common source of surprising "wrong optimum" results in QP-style fits (e.g.
+/// an MPC acceleration that can be negative).
 fn bounds(p: &QuadraticProgram) -> (Vec<Option<f64>>, Vec<Option<f64>>) {
     let n = p.c.len();
     (

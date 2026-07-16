@@ -231,7 +231,12 @@ impl PlanarPointMassMpc {
     /// velocity. The well is `weight · (radius − dist)²` inside `radius`, zero
     /// outside — smooth at the boundary, with a finite gradient everywhere (a
     /// degenerate exactly-on-centre case pushes along +x to avoid a 0/0).
-    fn obstacle_cost_grad(&self, p: [f64; 2], i: usize, obstacles: &[PlanarObstacle]) -> (f64, [f64; 2]) {
+    fn obstacle_cost_grad(
+        &self,
+        p: [f64; 2],
+        i: usize,
+        obstacles: &[PlanarObstacle],
+    ) -> (f64, [f64; 2]) {
         let mut cost = 0.0;
         let mut grad = [0.0, 0.0];
         let t = self.cfg.dt * i as f64;
@@ -397,8 +402,8 @@ impl PlanarPointMassMpc {
                     useq[i][1] - alpha * grad[i][1],
                 ];
                 let projected = self.project_disk(candidate);
-                step_norm += (projected[0] - useq[i][0]).powi(2)
-                    + (projected[1] - useq[i][1]).powi(2);
+                step_norm +=
+                    (projected[0] - useq[i][0]).powi(2) + (projected[1] - useq[i][1]).powi(2);
                 useq[i] = projected;
             }
             if step_norm.sqrt() < 1e-4 {
@@ -695,7 +700,10 @@ mod tests {
         let (end, clearance_obs) = min_clearance_to(cfg, target, &obstacles, probe, 110);
 
         let dp = ((end[0]).powi(2) + (end[1] - 20.0).powi(2)).sqrt();
-        assert!(dp < 1.5, "should still reach target, dist={dp}, end={end:?}");
+        assert!(
+            dp < 1.5,
+            "should still reach target, dist={dp}, end={end:?}"
+        );
         assert!(
             clearance_obs > clearance_free + 0.5,
             "obstacle should increase clearance: free={clearance_free}, obs={clearance_obs}"
@@ -721,13 +729,11 @@ mod tests {
         };
         let target = PlanarReference::arrive([60.0, 50.0]);
         let obstacles: Vec<PlanarObstacle> = (0..21)
-            .map(|k| {
-                PlanarObstacle {
-                    center: [5.0 + (k as f64) * 3.0, 8.0 + (k % 5) as f64 * 6.0],
-                    velocity: [0.5, -0.3],
-                    radius: 2.0,
-                    weight: 40.0,
-                }
+            .map(|k| PlanarObstacle {
+                center: [5.0 + (k as f64) * 3.0, 8.0 + (k % 5) as f64 * 6.0],
+                velocity: [0.5, -0.3],
+                radius: 2.0,
+                weight: 40.0,
             })
             .collect();
         // Warm up.
@@ -795,10 +801,7 @@ mod tests {
         assert_eq!(a, [0.0, 0.0]);
 
         // A NaN reference likewise coasts.
-        let a2 = mpc.control(
-            good,
-            &[PlanarReference::arrive([f64::INFINITY, 0.0])],
-        );
+        let a2 = mpc.control(good, &[PlanarReference::arrive([f64::INFINITY, 0.0])]);
         assert_eq!(a2, [0.0, 0.0]);
 
         // The controller still produces a sane, finite, in-disk control afterward.

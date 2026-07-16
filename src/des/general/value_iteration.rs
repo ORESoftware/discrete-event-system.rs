@@ -483,6 +483,36 @@ mod tests {
         assert!((res.v[1] - 20.0).abs() < 1e-6, "V[1]={}", res.v[1]);
     }
 
+    /// A discount outside [0, 1] (here γ = 1.5) would silently diverge the
+    /// Bellman backup toward ∞ on a recurrent MDP; the construction guard must
+    /// reject it up front rather than return an ∞-poisoned value function.
+    #[test]
+    #[should_panic(expected = "discount gamma must be finite and in [0, 1]")]
+    fn rejects_out_of_range_discount() {
+        let spec = MDPSpec {
+            num_states: 1,
+            num_actions: Box::new(|_s| 1),
+            outcomes: Box::new(|s, _a| {
+                vec![Outcome {
+                    prob: 1.0,
+                    reward: 1.0,
+                    next_state: s,
+                }]
+            }),
+            is_terminal: None,
+            terminal_reward: None,
+            state_label: None,
+            action_label: None,
+        };
+        let _ = value_iteration(
+            spec,
+            VIOptions {
+                gamma: 1.5,
+                ..Default::default()
+            },
+        );
+    }
+
     /// State 0 chooses between a zero-reward self-loop (action 0) and moving to
     /// terminal state 1 for reward 1 (action 1). With γ < 1 the move wins:
     /// V = [1, 0], policy = [1, -1].

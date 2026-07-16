@@ -1109,7 +1109,7 @@ fn add_single_linear_row_candidates(
 
 fn normalize_candidate_values(values: &mut [Vec<f64>], tol: f64) {
     for vals in values {
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         vals.dedup_by(|a, b| (*a - *b).abs() <= tol);
     }
 }

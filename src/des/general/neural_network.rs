@@ -392,9 +392,7 @@ impl TrainableNeuralNetwork for FeedForwardNetwork {
         target: &[f64],
         learning_rate: f64,
     ) -> TrainSampleResult {
-        if learning_rate < 0.0 {
-            panic!("learningRate must be non-negative, got {learning_rate}");
-        }
+        assert_valid_learning_rate(learning_rate);
         // A non-finite input/target is a runtime data hazard, not a structural bug:
         // drop the step (like a divergent gradient) instead of panicking in `forward`,
         // so a single NaN feature in a (correctly sized) sample can't crash a detached
@@ -446,6 +444,40 @@ pub struct ClippedTrainResult {
     pub clipped: bool,
 }
 
+/// Borrowed sample for one masked policy-gradient contribution to a minibatch.
+///
+/// `advantage` is the coefficient multiplying `grad(log pi(a|s))`; callers may
+/// pass an ordinary advantage, an importance-weighted PPO coefficient, or zero
+/// for a saturated clipped-surrogate branch. The network is held frozen while
+/// every sample in the minibatch is evaluated, then the mean gradient is applied
+/// exactly once.
+#[derive(Clone, Copy, Debug)]
+pub struct MaskedPolicyGradientBatchSample<'a> {
+    pub input: &'a [f64],
+    pub action: usize,
+    pub legal_action_mask: &'a [bool],
+    pub advantage: f64,
+}
+
+/// Outcome of one accumulated masked policy-gradient minibatch update.
+#[derive(Clone, Copy, Debug)]
+pub struct PolicyGradientBatchTrainResult {
+    /// Mean pre-update policy loss over accepted samples.
+    pub loss: f64,
+    /// Mean masked-policy entropy over accepted samples.
+    pub mean_entropy: f64,
+    /// Number of samples presented to the minibatch.
+    pub samples_seen: usize,
+    /// Number of finite, legal samples accumulated into the update.
+    pub samples_applied: usize,
+    /// Number of malformed/non-finite/illegal samples omitted from the update.
+    pub samples_skipped: usize,
+    /// Whether a finite mean gradient was applied to the network.
+    pub update_applied: bool,
+    /// Whether the accumulated mean gradient hit `max_grad_norm`.
+    pub clipped: bool,
+}
+
 impl FeedForwardNetwork {
     /// Gradient-clipped, divergence-guarded SGD step.
     ///
@@ -468,9 +500,7 @@ impl FeedForwardNetwork {
         learning_rate: f64,
         max_grad_norm: f64,
     ) -> ClippedTrainResult {
-        if learning_rate < 0.0 {
-            panic!("learningRate must be non-negative, got {learning_rate}");
-        }
+        assert_valid_learning_rate(learning_rate);
         // A non-finite input or target is a runtime data hazard, not a structural
         // bug: drop the step (like a divergent gradient) instead of panicking in
         // `forward`, so a single NaN feature can't crash a detached training
@@ -511,9 +541,7 @@ impl FeedForwardNetwork {
         momentum: f64,
         state: &mut FeedForwardMomentumState,
     ) -> ClippedTrainResult {
-        if learning_rate < 0.0 {
-            panic!("learningRate must be non-negative, got {learning_rate}");
-        }
+        assert_valid_learning_rate(learning_rate);
         if !vector_is_finite(input, self.input_dim) || !vector_is_finite(target, self.output_dim) {
             if input.len() == self.input_dim && target.len() == self.output_dim {
                 return ClippedTrainResult {
@@ -706,9 +734,7 @@ impl FeedForwardNetwork {
         learning_rate: f64,
         max_grad_norm: f64,
     ) -> ClippedTrainResult {
-        if learning_rate < 0.0 {
-            panic!("learningRate must be non-negative, got {learning_rate}");
-        }
+        assert_valid_learning_rate(learning_rate);
         assert!(
             action < self.output_dim,
             "policy action index {action} out of range for {} outputs",
@@ -770,9 +796,7 @@ impl FeedForwardNetwork {
         learning_rate: f64,
         max_grad_norm: f64,
     ) -> ClippedTrainResult {
-        if learning_rate < 0.0 {
-            panic!("learningRate must be non-negative, got {learning_rate}");
-        }
+        assert_valid_learning_rate(learning_rate);
         assert_eq!(
             legal_action_mask.len(),
             self.output_dim,
@@ -834,6 +858,250 @@ impl FeedForwardNetwork {
         self.apply_output_error_gradient(&trace, d_a, loss, learning_rate, max_grad_norm, None, 0.0)
     }
 
+    /// Apply one mean-gradient update for a minibatch of masked policy samples.
+    ///
+    /// Unlike repeated [`Self::train_policy_gradient_sample_masked`] calls, all
+    /// probabilities and gradients are evaluated against the same pre-update
+    /// parameters. This makes the update a true minibatch step instead of
+    /// order-dependent per-sample SGD. Invalid runtime samples are skipped;
+    /// structural dimension mismatches still panic just like the single-sample
+    /// API. The accumulated gradient is averaged before global-norm clipping, so
+    /// the learning rate does not scale with minibatch length.
+    pub fn train_policy_gradient_batch_masked<'a, I>(
+        &mut self,
+        samples: I,
+        entropy_coeff: f64,
+        learning_rate: f64,
+        max_grad_norm: f64,
+    ) -> PolicyGradientBatchTrainResult
+    where
+        I: IntoIterator<Item = MaskedPolicyGradientBatchSample<'a>>,
+    {
+        assert_valid_learning_rate(learning_rate);
+        debug_assert_eq!(
+            self.layers.last().map(|layer| layer.activation),
+            Some(ActivationName::Linear),
+            "train_policy_gradient_batch_masked requires a Linear output layer"
+        );
+
+        let mut weight_grads: Vec<Vec<Vec<f64>>> = self
+            .layers
+            .iter()
+            .map(|layer| {
+                layer
+                    .weights
+                    .iter()
+                    .map(|row| vec![0.0; row.len()])
+                    .collect()
+            })
+            .collect();
+        let mut bias_grads: Vec<Vec<f64>> = self
+            .layers
+            .iter()
+            .map(|layer| vec![0.0; layer.biases.len()])
+            .collect();
+        let mut samples_seen = 0usize;
+        let mut samples_applied = 0usize;
+        let mut loss_sum = 0.0;
+        let mut entropy_sum = 0.0;
+
+        for sample in samples {
+            samples_seen = samples_seen.saturating_add(1);
+            assert_eq!(
+                sample.legal_action_mask.len(),
+                self.output_dim,
+                "legal action mask must match policy output dimension"
+            );
+            assert!(
+                sample.action < self.output_dim,
+                "policy action index {} out of range for {} outputs",
+                sample.action,
+                self.output_dim
+            );
+            if !sample.legal_action_mask[sample.action]
+                || !sample.advantage.is_finite()
+                || !vector_is_finite(sample.input, self.input_dim)
+            {
+                if sample.input.len() == self.input_dim {
+                    continue;
+                }
+            }
+            self.assert_vector(sample.input, self.input_dim, "input");
+
+            let trace = self.forward(sample.input);
+            let logits = &trace.activations[self.layers.len()];
+            let probs = masked_softmax(logits, sample.legal_action_mask);
+            if probs.iter().any(|probability| !probability.is_finite()) {
+                continue;
+            }
+            let entropy: f64 = -probs
+                .iter()
+                .zip(sample.legal_action_mask.iter())
+                .map(|(&probability, &legal)| {
+                    if legal && probability > 0.0 {
+                        probability * probability.ln()
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f64>();
+            let loss =
+                -sample.advantage * probs[sample.action].max(1e-12).ln() - entropy_coeff * entropy;
+            if !loss.is_finite() || !entropy.is_finite() {
+                continue;
+            }
+
+            let mut d_a = vec![0.0; self.output_dim];
+            for i in 0..self.output_dim {
+                if !sample.legal_action_mask[i] {
+                    continue;
+                }
+                let onehot = if i == sample.action { 1.0 } else { 0.0 };
+                let policy_grad = sample.advantage * (probs[i] - onehot);
+                let entropy_grad = entropy_coeff * probs[i] * (probs[i].max(1e-12).ln() + entropy);
+                d_a[i] = policy_grad + entropy_grad;
+            }
+
+            let mut sample_weight_grads: Vec<Vec<Vec<f64>>> = self
+                .layers
+                .iter()
+                .map(|layer| {
+                    layer
+                        .weights
+                        .iter()
+                        .map(|row| vec![0.0; row.len()])
+                        .collect()
+                })
+                .collect();
+            let mut sample_bias_grads: Vec<Vec<f64>> = self
+                .layers
+                .iter()
+                .map(|layer| vec![0.0; layer.biases.len()])
+                .collect();
+            let mut finite = true;
+            for k in (0..self.layers.len()).rev() {
+                let activation = self.layers[k].activation;
+                let prev_a = &trace.activations[k];
+                let cur_a = &trace.activations[k + 1];
+                let cur_z = &trace.z[k];
+                let delta: Vec<f64> = (0..cur_a.len())
+                    .map(|i| d_a[i] * activation_prime_from_output(activation, cur_a[i], cur_z[i]))
+                    .collect();
+                if delta.iter().any(|value| !value.is_finite()) {
+                    finite = false;
+                    break;
+                }
+                let weights = &self.layers[k].weights;
+                let mut d_prev = vec![0.0; prev_a.len()];
+                for i in 0..weights.len() {
+                    for j in 0..weights[i].len() {
+                        d_prev[j] += weights[i][j] * delta[i];
+                        sample_weight_grads[k][i][j] = delta[i] * prev_a[j];
+                    }
+                    sample_bias_grads[k][i] = delta[i];
+                }
+                if d_prev.iter().any(|value| !value.is_finite()) {
+                    finite = false;
+                    break;
+                }
+                d_a = d_prev;
+            }
+            if !finite
+                || sample_weight_grads
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .any(|value| !value.is_finite())
+                || sample_bias_grads
+                    .iter()
+                    .flatten()
+                    .any(|value| !value.is_finite())
+            {
+                continue;
+            }
+
+            for k in 0..self.layers.len() {
+                for i in 0..weight_grads[k].len() {
+                    for j in 0..weight_grads[k][i].len() {
+                        weight_grads[k][i][j] += sample_weight_grads[k][i][j];
+                    }
+                    bias_grads[k][i] += sample_bias_grads[k][i];
+                }
+            }
+            loss_sum += loss;
+            entropy_sum += entropy;
+            samples_applied = samples_applied.saturating_add(1);
+        }
+
+        let samples_skipped = samples_seen.saturating_sub(samples_applied);
+        if samples_applied == 0 {
+            return PolicyGradientBatchTrainResult {
+                loss: 0.0,
+                mean_entropy: 0.0,
+                samples_seen,
+                samples_applied,
+                samples_skipped,
+                update_applied: false,
+                clipped: false,
+            };
+        }
+
+        let inv_count = 1.0 / samples_applied as f64;
+        let mut sum_sq = 0.0;
+        let mut finite = true;
+        for k in 0..self.layers.len() {
+            for i in 0..weight_grads[k].len() {
+                for gradient in &mut weight_grads[k][i] {
+                    *gradient *= inv_count;
+                    finite &= gradient.is_finite();
+                    sum_sq += *gradient * *gradient;
+                }
+                bias_grads[k][i] *= inv_count;
+                finite &= bias_grads[k][i].is_finite();
+                sum_sq += bias_grads[k][i] * bias_grads[k][i];
+            }
+        }
+        let mean_loss = loss_sum * inv_count;
+        let mean_entropy = entropy_sum * inv_count;
+        finite &= sum_sq.is_finite() && mean_loss.is_finite() && mean_entropy.is_finite();
+        if !finite {
+            return PolicyGradientBatchTrainResult {
+                loss: mean_loss,
+                mean_entropy,
+                samples_seen,
+                samples_applied,
+                samples_skipped,
+                update_applied: false,
+                clipped: false,
+            };
+        }
+
+        let grad_norm = sum_sq.sqrt();
+        let scale = if max_grad_norm > 0.0 && grad_norm > max_grad_norm {
+            max_grad_norm / grad_norm
+        } else {
+            1.0
+        };
+        let step = learning_rate * scale;
+        for k in 0..self.layers.len() {
+            for i in 0..self.layers[k].weights.len() {
+                for j in 0..self.layers[k].weights[i].len() {
+                    self.layers[k].weights[i][j] -= step * weight_grads[k][i][j];
+                }
+                self.layers[k].biases[i] -= step * bias_grads[k][i];
+            }
+        }
+        PolicyGradientBatchTrainResult {
+            loss: mean_loss,
+            mean_entropy,
+            samples_seen,
+            samples_applied,
+            samples_skipped,
+            update_applied: true,
+            clipped: scale < 1.0,
+        }
+    }
+
     /// Momentum variant of [`Self::train_policy_gradient_sample`].
     pub fn train_policy_gradient_sample_with_momentum(
         &mut self,
@@ -846,9 +1114,7 @@ impl FeedForwardNetwork {
         momentum: f64,
         state: &mut FeedForwardMomentumState,
     ) -> ClippedTrainResult {
-        if learning_rate < 0.0 {
-            panic!("learningRate must be non-negative, got {learning_rate}");
-        }
+        assert_valid_learning_rate(learning_rate);
         assert!(
             action < self.output_dim,
             "policy action index {action} out of range for {} outputs",
@@ -981,6 +1247,13 @@ impl FeedForwardNetwork {
 /// runtime hazard) rather than panic inside [`FeedForwardNetwork::forward`].
 fn vector_is_finite(v: &[f64], dim: usize) -> bool {
     v.len() == dim && v.iter().all(|x| x.is_finite())
+}
+
+fn assert_valid_learning_rate(learning_rate: f64) {
+    assert!(
+        learning_rate.is_finite() && learning_rate >= 0.0,
+        "learningRate must be finite and non-negative, got {learning_rate}"
+    );
 }
 
 fn activate(name: ActivationName, z: f64) -> f64 {
@@ -1845,6 +2118,30 @@ mod tests {
 
     use super::*;
 
+    fn assert_close(left: f64, right: f64) {
+        assert!(
+            (left - right).abs() <= 1e-12,
+            "values differ: left={left:.17}, right={right:.17}"
+        );
+    }
+
+    fn assert_network_parameters_close(left: &FeedForwardNetwork, right: &FeedForwardNetwork) {
+        assert_eq!(left.layers.len(), right.layers.len());
+        for (left_layer, right_layer) in left.layers.iter().zip(&right.layers) {
+            assert_eq!(left_layer.weights.len(), right_layer.weights.len());
+            for (left_row, right_row) in left_layer.weights.iter().zip(&right_layer.weights) {
+                assert_eq!(left_row.len(), right_row.len());
+                for (&left_value, &right_value) in left_row.iter().zip(right_row) {
+                    assert_close(left_value, right_value);
+                }
+            }
+            assert_eq!(left_layer.biases.len(), right_layer.biases.len());
+            for (&left_value, &right_value) in left_layer.biases.iter().zip(&right_layer.biases) {
+                assert_close(left_value, right_value);
+            }
+        }
+    }
+
     #[test]
     fn policy_gradient_raises_probability_of_a_positive_advantage_action() {
         // 3-action softmax policy over a 2-d state. Repeatedly reinforce action 2
@@ -1894,6 +2191,273 @@ mod tests {
         let skipped =
             policy.train_policy_gradient_sample_masked(&state, 1, &mask, 1.0, 0.0, 0.1, 5.0);
         assert!(!skipped.applied, "illegal sampled action should be skipped");
+    }
+
+    #[test]
+    fn masked_policy_gradient_batch_size_one_matches_single_step() {
+        let layers = vec![
+            DenseLayerConfig {
+                weights: vec![vec![0.2, -0.1], vec![-0.3, 0.4]],
+                biases: vec![0.01, -0.02],
+                activation: ActivationName::Tanh,
+            },
+            DenseLayerConfig {
+                weights: vec![vec![0.1, -0.2], vec![0.3, 0.05], vec![-0.1, 0.4]],
+                biases: vec![0.01, -0.02, 0.03],
+                activation: ActivationName::Linear,
+            },
+        ];
+        let mut single = FeedForwardNetwork::new(layers.clone());
+        let mut batched = FeedForwardNetwork::new(layers);
+        let input = [0.5, -0.25];
+        let mask = [true, false, true];
+        let single_result =
+            single.train_policy_gradient_sample_masked(&input, 2, &mask, 0.8, 0.01, 0.03, 5.0);
+        let batch_result = batched.train_policy_gradient_batch_masked(
+            [MaskedPolicyGradientBatchSample {
+                input: &input,
+                action: 2,
+                legal_action_mask: &mask,
+                advantage: 0.8,
+            }],
+            0.01,
+            0.03,
+            5.0,
+        );
+
+        assert!(single_result.applied && batch_result.update_applied);
+        assert_eq!(batch_result.samples_seen, 1);
+        assert_eq!(batch_result.samples_applied, 1);
+        assert_eq!(batch_result.samples_skipped, 0);
+        assert_eq!(single_result.loss, batch_result.loss);
+        assert_network_parameters_close(&single, &batched);
+    }
+
+    #[test]
+    fn masked_policy_gradient_batch_is_permutation_invariant() {
+        let layer = DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1], vec![-0.3, 0.4], vec![0.1, 0.05]],
+            biases: vec![0.01, -0.02, 0.03],
+            activation: ActivationName::Linear,
+        };
+        let mut forward = FeedForwardNetwork::new(vec![layer.clone()]);
+        let mut reverse = FeedForwardNetwork::new(vec![layer]);
+        let first_input = [0.5, -0.25];
+        let second_input = [-0.3, 0.8];
+        let mask = [true, true, true];
+        let first = MaskedPolicyGradientBatchSample {
+            input: &first_input,
+            action: 0,
+            legal_action_mask: &mask,
+            advantage: 0.75,
+        };
+        let second = MaskedPolicyGradientBatchSample {
+            input: &second_input,
+            action: 2,
+            legal_action_mask: &mask,
+            advantage: -0.4,
+        };
+
+        let forward_result =
+            forward.train_policy_gradient_batch_masked([first, second], 0.01, 0.03, 5.0);
+        let reverse_result =
+            reverse.train_policy_gradient_batch_masked([second, first], 0.01, 0.03, 5.0);
+        assert!(forward_result.update_applied && reverse_result.update_applied);
+        assert_eq!(forward.layers[0].weights, reverse.layers[0].weights);
+        assert_eq!(forward.layers[0].biases, reverse.layers[0].biases);
+    }
+
+    #[test]
+    fn masked_policy_gradient_batch_skips_nonfinite_and_illegal_samples() {
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1], vec![-0.3, 0.4], vec![0.1, 0.05]],
+            biases: vec![0.01, -0.02, 0.03],
+            activation: ActivationName::Linear,
+        }]);
+        let good_input = [0.5, -0.25];
+        let bad_input = [f64::NAN, 0.2];
+        let all_legal = [true, true, true];
+        let action_zero_illegal = [false, true, true];
+        let result = policy.train_policy_gradient_batch_masked(
+            [
+                MaskedPolicyGradientBatchSample {
+                    input: &good_input,
+                    action: 2,
+                    legal_action_mask: &all_legal,
+                    advantage: 0.8,
+                },
+                MaskedPolicyGradientBatchSample {
+                    input: &bad_input,
+                    action: 1,
+                    legal_action_mask: &all_legal,
+                    advantage: 1.0,
+                },
+                MaskedPolicyGradientBatchSample {
+                    input: &good_input,
+                    action: 0,
+                    legal_action_mask: &action_zero_illegal,
+                    advantage: 1.0,
+                },
+            ],
+            0.01,
+            0.03,
+            5.0,
+        );
+
+        assert!(result.update_applied);
+        assert_eq!(result.samples_seen, 3);
+        assert_eq!(result.samples_applied, 1);
+        assert_eq!(result.samples_skipped, 2);
+        assert!(policy
+            .layers
+            .iter()
+            .flat_map(|layer| layer.weights.iter().flatten().chain(layer.biases.iter()))
+            .all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn masked_policy_gradient_batch_uses_mean_gradient() {
+        let layer = DenseLayerConfig {
+            weights: vec![vec![0.2, -0.1], vec![-0.3, 0.4], vec![0.1, 0.05]],
+            biases: vec![0.01, -0.02, 0.03],
+            activation: ActivationName::Linear,
+        };
+        let mut one_copy = FeedForwardNetwork::new(vec![layer.clone()]);
+        let mut three_copies = FeedForwardNetwork::new(vec![layer]);
+        let input = [0.5, -0.25];
+        let mask = [true, true, false];
+        let sample = MaskedPolicyGradientBatchSample {
+            input: &input,
+            action: 0,
+            legal_action_mask: &mask,
+            advantage: 0.8,
+        };
+
+        let one = one_copy.train_policy_gradient_batch_masked([sample], 0.01, 0.03, 5.0);
+        let three = three_copies.train_policy_gradient_batch_masked(
+            [sample, sample, sample],
+            0.01,
+            0.03,
+            5.0,
+        );
+
+        assert!(one.update_applied && three.update_applied);
+        assert_close(one.loss, three.loss);
+        assert_close(one.mean_entropy, three.mean_entropy);
+        assert_network_parameters_close(&one_copy, &three_copies);
+    }
+
+    #[test]
+    fn masked_policy_gradient_batch_clips_the_mean_gradient() {
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+            biases: vec![0.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        let before = policy.layers.clone();
+        let input = [10.0, -10.0];
+        let mask = [true, true];
+        let sample = MaskedPolicyGradientBatchSample {
+            input: &input,
+            action: 1,
+            legal_action_mask: &mask,
+            advantage: 1.0e9,
+        };
+        let learning_rate = 0.2;
+        let max_grad_norm = 0.5;
+
+        let result = policy.train_policy_gradient_batch_masked(
+            [sample, sample],
+            0.0,
+            learning_rate,
+            max_grad_norm,
+        );
+
+        assert!(result.update_applied);
+        assert!(result.clipped);
+        let delta_norm = policy
+            .layers
+            .iter()
+            .zip(&before)
+            .flat_map(|(after, before)| {
+                after
+                    .weights
+                    .iter()
+                    .flatten()
+                    .zip(before.weights.iter().flatten())
+                    .map(|(after, before)| (after - before).powi(2))
+                    .chain(
+                        after
+                            .biases
+                            .iter()
+                            .zip(&before.biases)
+                            .map(|(after, before)| (after - before).powi(2)),
+                    )
+            })
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            delta_norm <= learning_rate * max_grad_norm * (1.0 + 1e-12),
+            "clipped parameter delta {delta_norm} exceeded {}",
+            learning_rate * max_grad_norm
+        );
+    }
+
+    #[test]
+    fn masked_policy_gradient_batch_with_no_accepted_samples_is_a_noop() {
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.2], vec![-0.3]],
+            biases: vec![0.01, -0.02],
+            activation: ActivationName::Linear,
+        }]);
+        let before = policy.layers.clone();
+        let input = [0.5];
+        let mask = [false, true];
+        let result = policy.train_policy_gradient_batch_masked(
+            [MaskedPolicyGradientBatchSample {
+                input: &input,
+                action: 0,
+                legal_action_mask: &mask,
+                advantage: 1.0,
+            }],
+            0.0,
+            0.1,
+            5.0,
+        );
+
+        assert_eq!(result.samples_seen, 1);
+        assert_eq!(result.samples_applied, 0);
+        assert_eq!(result.samples_skipped, 1);
+        assert!(!result.update_applied);
+        assert!(!result.clipped);
+        assert_eq!(policy.layers.len(), before.len());
+        for (after, before) in policy.layers.iter().zip(before) {
+            assert_eq!(after.weights, before.weights);
+            assert_eq!(after.biases, before.biases);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "learningRate must be finite and non-negative")]
+    fn masked_policy_gradient_batch_rejects_nonfinite_learning_rate() {
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.0], vec![0.0]],
+            biases: vec![0.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        let input = [1.0];
+        let mask = [true, true];
+        let _ = policy.train_policy_gradient_batch_masked(
+            [MaskedPolicyGradientBatchSample {
+                input: &input,
+                action: 0,
+                legal_action_mask: &mask,
+                advantage: 1.0,
+            }],
+            0.0,
+            f64::NAN,
+            5.0,
+        );
     }
 
     #[test]

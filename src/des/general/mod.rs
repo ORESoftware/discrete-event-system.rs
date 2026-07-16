@@ -157,3 +157,111 @@ pub mod universal_model_spec;
 
 // Adapters: wrap solver/model modules as DES stations / universal-model specs.
 pub mod adapters;
+
+#[cfg(test)]
+mod tests {
+    use super::mpc_point_mass::{
+        PlanarMpcConfig, PlanarPointMassMpc, PlanarReference, PlanarState,
+    };
+    use super::neural_network::{
+        ActivationName, DenseLayerConfig, FeedForwardNetwork, MaskedPolicyGradientBatchSample,
+    };
+    use super::qp::{solve_qp_active_set, QPOptions, QPStatus, QuadraticProgram};
+    use super::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
+
+    #[test]
+    fn super_module_exposes_masked_policy_minibatch_training() {
+        let mut policy = FeedForwardNetwork::new(vec![DenseLayerConfig {
+            weights: vec![vec![0.0], vec![8.0], vec![0.0]],
+            biases: vec![0.0, 8.0, 0.0],
+            activation: ActivationName::Linear,
+        }]);
+        let input = [1.0];
+        let mask = [true, false, true];
+        let before = policy.action_probabilities_masked(&input, &mask);
+        let result = policy.train_policy_gradient_batch_masked(
+            [MaskedPolicyGradientBatchSample {
+                input: &input,
+                action: 2,
+                legal_action_mask: &mask,
+                advantage: 1.0,
+            }],
+            0.0,
+            0.1,
+            5.0,
+        );
+        let after = policy.action_probabilities_masked(&input, &mask);
+
+        assert!(result.update_applied);
+        assert_eq!(result.samples_applied, 1);
+        assert_eq!(after[1], 0.0, "illegal action gained probability mass");
+        assert!(
+            after[2] > before[2],
+            "reinforced legal action did not improve"
+        );
+    }
+
+    #[test]
+    fn super_module_composes_qp_and_planar_mpc_primitives() {
+        let solution = solve_qp_active_set(
+            &QuadraticProgram {
+                q: vec![vec![2.0]],
+                c: vec![-4.0],
+                lb: Some(vec![Some(0.0)]),
+                ub: Some(vec![Some(1.5)]),
+                ..Default::default()
+            },
+            QPOptions::default(),
+        );
+        assert_eq!(solution.status, QPStatus::Optimal);
+        assert!((solution.x[0] - 1.5).abs() < 1e-8, "{solution:?}");
+
+        let config = PlanarMpcConfig {
+            a_max: solution.x[0],
+            ..Default::default()
+        };
+        let mut controller = PlanarPointMassMpc::new(config).expect("valid MPC config");
+        let acceleration = controller.control(
+            PlanarState {
+                pos: [0.0, 0.0],
+                vel: [0.0, 0.0],
+            },
+            &[PlanarReference::arrive([10.0, 10.0])],
+        );
+        let magnitude = acceleration[0].hypot(acceleration[1]);
+        assert!(magnitude.is_finite());
+        assert!(magnitude <= solution.x[0] + 1e-9);
+    }
+
+    #[test]
+    fn super_module_value_iteration_contract_is_consumer_ready() {
+        let result = value_iteration(
+            MDPSpec {
+                num_states: 2,
+                num_actions: Box::new(|state| if state == 0 { 2 } else { 0 }),
+                outcomes: Box::new(|state, action| match (state, action) {
+                    (0, 0) => vec![Outcome {
+                        prob: 1.0,
+                        reward: 0.0,
+                        next_state: 0,
+                    }],
+                    (0, 1) => vec![Outcome {
+                        prob: 1.0,
+                        reward: 2.0,
+                        next_state: 1,
+                    }],
+                    _ => Vec::new(),
+                }),
+                is_terminal: Some(Box::new(|state| state == 1)),
+                terminal_reward: Some(Box::new(|_| 0.0)),
+                state_label: None,
+                action_label: None,
+            },
+            VIOptions::default(),
+        );
+
+        assert_eq!(result.policy, vec![1, -1]);
+        assert!((result.v[0] - 2.0).abs() < 1e-9);
+        assert_eq!(result.v[1], 0.0);
+    }
+}

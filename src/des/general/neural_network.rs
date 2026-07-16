@@ -274,6 +274,7 @@ impl FeedForwardNetwork {
     where
         I: IntoIterator<Item = (&'a [f64], &'a [f64])>,
     {
+        assert_valid_learning_rate(learning_rate);
         let mut total = 0.0;
         let mut count = 0usize;
         for (input, target) in samples {
@@ -1197,6 +1198,7 @@ impl FeedForwardNetwork {
     where
         I: IntoIterator<Item = (&'a [f64], &'a [f64])>,
     {
+        assert_valid_learning_rate(learning_rate);
         let mut total = 0.0;
         let mut count = 0usize;
         for (input, target) in samples {
@@ -1222,6 +1224,7 @@ impl FeedForwardNetwork {
     where
         I: IntoIterator<Item = (&'a [f64], &'a [f64])>,
     {
+        assert_valid_learning_rate(learning_rate);
         let mut total = 0.0;
         let mut count = 0usize;
         for (input, target) in samples {
@@ -2457,6 +2460,52 @@ mod tests {
             0.0,
             f64::NAN,
             5.0,
+        );
+    }
+
+    #[test]
+    fn empty_batch_trainers_reject_nonfinite_learning_rates() {
+        let layers = vec![DenseLayerConfig {
+            weights: vec![vec![0.0]],
+            biases: vec![0.0],
+            activation: ActivationName::Linear,
+        }];
+
+        let plain = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut network = FeedForwardNetwork::new(layers.clone());
+            let samples: Vec<(NumericVector, NumericVector)> = Vec::new();
+            let _ = network.train_batch(&samples, f64::NAN);
+        }));
+        assert!(
+            plain.is_err(),
+            "empty train_batch accepted NaN learning rate"
+        );
+
+        let clipped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut network = FeedForwardNetwork::new(layers.clone());
+            let samples = std::iter::empty::<(&[f64], &[f64])>();
+            let _ = network.train_batch_slices_clipped(samples, f64::INFINITY, 1.0);
+        }));
+        assert!(
+            clipped.is_err(),
+            "empty clipped batch accepted infinite learning rate"
+        );
+
+        let momentum = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut network = FeedForwardNetwork::new(layers.clone());
+            let mut state = FeedForwardMomentumState::default();
+            let samples = std::iter::empty::<(&[f64], &[f64])>();
+            let _ = network.train_batch_slices_clipped_with_momentum(
+                samples,
+                f64::NEG_INFINITY,
+                1.0,
+                0.9,
+                &mut state,
+            );
+        }));
+        assert!(
+            momentum.is_err(),
+            "empty momentum batch accepted infinite learning rate"
         );
     }
 

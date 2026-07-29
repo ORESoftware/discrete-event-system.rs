@@ -54,4 +54,4 @@ jobs:
         run: cargo test --locked --bin formal_benchmark_validation_reference
 
       - name: Test formal tool adapters
-        run: cargo test --locked --lib external_validation_tools
+        run: cargo test --locked --lib formal

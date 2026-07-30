@@ -1,10 +1,12 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::io::{self, Read};
+use std::io;
 
 use des_engine::des::general::external_validation_tools::run_proof_validation_json_with_rust_reference;
 use serde_json::{json, Value};
+
+mod common;
 
 #[derive(Debug)]
 struct CliError(String);
@@ -66,7 +68,7 @@ fn parse_args(program: &str, args: impl IntoIterator<Item = String>) -> Result<S
             }
         }
     }
-    Ok(tool)
+    common::validate_tool_id(tool).map_err(CliError)
 }
 
 fn error_json(message: impl Into<String>) -> Value {
@@ -107,11 +109,13 @@ fn main() {
         );
         return;
     }
-    let mut stdin = String::new();
-    if let Err(err) = io::stdin().read_to_string(&mut stdin) {
-        println!("{}", error_json(format!("failed to read stdin: {err}")));
-        std::process::exit(1);
-    }
+    let stdin = match common::read_validation_input(io::stdin().lock()) {
+        Ok(stdin) => stdin,
+        Err(err) => {
+            println!("{}", error_json(err));
+            std::process::exit(1);
+        }
+    };
     match run(raw_args, &stdin) {
         Ok(output) => println!(
             "{}",

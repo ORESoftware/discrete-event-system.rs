@@ -1,10 +1,12 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::io::{self, Read};
+use std::io;
 
 use des_engine::des::general::external_validation_tools::run_formal_benchmark_validation_json_with_rust_reference;
 use serde_json::{json, Value};
+
+mod common;
 
 #[derive(Debug)]
 struct CliError(String);
@@ -59,12 +61,15 @@ fn parse_args(
         };
         match key.as_str() {
             "--tool" => {
-                tool = Some(next_option_value(
-                    program,
-                    "--tool",
-                    inline_value,
-                    &mut values,
-                )?);
+                tool = Some(
+                    common::validate_tool_id(next_option_value(
+                        program,
+                        "--tool",
+                        inline_value,
+                        &mut values,
+                    )?)
+                    .map_err(CliError)?,
+                );
             }
             _ => {
                 return Err(CliError(format!(
@@ -108,7 +113,8 @@ fn run(raw_args: Vec<String>, stdin: &str) -> Result<Value, CliError> {
     let tool_override = parse_args(&program, raw_args.into_iter().skip(1))?;
     let payload = serde_json::from_str::<Value>(stdin)
         .map_err(|err| CliError(format!("parse JSON: {err}")))?;
-    let tool = selected_tool(&payload, tool_override);
+    let tool =
+        common::validate_tool_id(selected_tool(&payload, tool_override)).map_err(CliError)?;
     Ok(run_formal_benchmark_validation_json_with_rust_reference(
         &payload, &tool,
     ))
@@ -128,11 +134,13 @@ fn main() {
         );
         return;
     }
-    let mut stdin = String::new();
-    if let Err(err) = io::stdin().read_to_string(&mut stdin) {
-        println!("{}", error_json(format!("failed to read stdin: {err}")));
-        std::process::exit(1);
-    }
+    let stdin = match common::read_validation_input(io::stdin().lock()) {
+        Ok(stdin) => stdin,
+        Err(err) => {
+            println!("{}", error_json(err));
+            std::process::exit(1);
+        }
+    };
     match run(raw_args, &stdin) {
         Ok(output) => println!(
             "{}",

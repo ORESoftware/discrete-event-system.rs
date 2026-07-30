@@ -3690,7 +3690,23 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
         DefaultSettingsBuilder, DefaultSolver, IPSolver, SolverStatus, SupportedConeT,
     };
     let t0 = Instant::now();
+    validate_lp_dimensions(p);
     let n = p.c.len();
+    let (lb, ub) = normalized_lp_bounds(p);
+    for j in 0..n {
+        if let (Some(lower), Some(upper)) = (lb[j], ub[j]) {
+            if lower > upper {
+                return empty_lp_solution(
+                    LPStatus::Infeasible,
+                    "clarabel",
+                    t0,
+                    Some(format!(
+                        "clarabel bound validation failed: lb[{j}]={lower} exceeds ub[{j}]={upper}"
+                    )),
+                );
+            }
+        }
+    }
     let maximize = matches!(p.sense, Sense::Max);
     let q: Vec<f64> =
         p.c.iter()
@@ -3715,26 +3731,22 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
             n_ineq += 1;
         }
     }
-    if let Some(lb) = p.lb.as_ref() {
-        for (j, bound) in lb.iter().enumerate().take(n) {
-            if let Some(l) = bound {
-                let mut row = vec![0.0; n];
-                row[j] = -1.0;
-                a_rows.push(row);
-                b.push(-*l);
-                n_ineq += 1;
-            }
+    for (j, bound) in lb.iter().enumerate().take(n) {
+        if let Some(l) = bound {
+            let mut row = vec![0.0; n];
+            row[j] = -1.0;
+            a_rows.push(row);
+            b.push(-*l);
+            n_ineq += 1;
         }
     }
-    if let Some(ub) = p.ub.as_ref() {
-        for (j, bound) in ub.iter().enumerate().take(n) {
-            if let Some(u) = bound {
-                let mut row = vec![0.0; n];
-                row[j] = 1.0;
-                a_rows.push(row);
-                b.push(*u);
-                n_ineq += 1;
-            }
+    for (j, bound) in ub.iter().enumerate().take(n) {
+        if let Some(u) = bound {
+            let mut row = vec![0.0; n];
+            row[j] = 1.0;
+            a_rows.push(row);
+            b.push(*u);
+            n_ineq += 1;
         }
     }
     let m = a_rows.len();
@@ -6155,6 +6167,115 @@ mod tests {
         assert!((sol.objective - 11.0).abs() < 1e-4, "obj={}", sol.objective);
         assert!((sol.x[0] - 3.0).abs() < 1e-4, "x0={}", sol.x[0]);
         assert!((sol.x[1] - 1.0).abs() < 1e-4, "x1={}", sol.x[1]);
+    }
+
+    #[test]
+    fn clarabel_absent_lower_bounds_default_to_zero() {
+        // min x  s.t.  x >= -5 and the documented default x >= 0  ->  0.
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![-1.0]]),
+            b_ub: Some(vec![5.0]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_clarabel(&p);
+
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!(sol.x[0] >= -1e-6, "x0={}", sol.x[0]);
+        assert!(sol.objective.abs() < 1e-5, "obj={}", sol.objective);
+    }
+
+    #[test]
+    fn clarabel_explicit_zero_lower_bound_matches_default() {
+        // Same model as the absent-bound test, but with an explicit zero lower bound.
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![-1.0]]),
+            b_ub: Some(vec![5.0]),
+            lb: Some(vec![Some(0.0)]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_clarabel(&p);
+
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!(sol.x[0] >= -1e-6, "x0={}", sol.x[0]);
+        assert!(sol.objective.abs() < 1e-5, "obj={}", sol.objective);
+    }
+
+    #[test]
+    fn clarabel_explicit_none_lower_bound_remains_free() {
+        // min x  s.t.  x >= -5 and x free below  ->  -5.
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![-1.0]]),
+            b_ub: Some(vec![5.0]),
+            lb: Some(vec![None]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_clarabel(&p);
+
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.x[0] + 5.0).abs() < 1e-4, "x0={}", sol.x[0]);
+        assert!((sol.objective + 5.0).abs() < 1e-4, "obj={}", sol.objective);
+    }
+
+    #[test]
+    fn clarabel_one_sided_upper_bound_preserves_default_lower_bound() {
+        // max x with only x <= 4 and the default x >= 0  ->  4.
+        let p = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            ub: Some(vec![Some(4.0)]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_clarabel(&p);
+
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.x[0] - 4.0).abs() < 1e-4, "x0={}", sol.x[0]);
+        assert!((sol.objective - 4.0).abs() < 1e-4, "obj={}", sol.objective);
+    }
+
+    #[test]
+    fn clarabel_fixed_variable_bounds_are_honored() {
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0],
+            lb: Some(vec![Some(2.5)]),
+            ub: Some(vec![Some(2.5)]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_clarabel(&p);
+
+        assert_eq!(sol.status, LPStatus::Optimal, "{:?}", sol.message);
+        assert!((sol.x[0] - 2.5).abs() < 1e-4, "x0={}", sol.x[0]);
+        assert!((sol.objective - 2.5).abs() < 1e-4, "obj={}", sol.objective);
+    }
+
+    #[test]
+    fn clarabel_contradictory_bounds_fail_before_solver_construction() {
+        let p = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0],
+            lb: Some(vec![Some(3.0)]),
+            ub: Some(vec![Some(2.0)]),
+            ..Default::default()
+        };
+
+        let sol = solve_lp_clarabel(&p);
+
+        assert_eq!(sol.status, LPStatus::Infeasible, "{:?}", sol.message);
+        assert!(sol
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("bound validation failed")));
     }
 
     #[test]

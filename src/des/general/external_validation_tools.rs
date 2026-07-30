@@ -13447,10 +13447,23 @@ fn model_validation_pddl_reference(payload: &Value, tool: &str) -> Value {
     }
 }
 
+const MAX_REFERENCE_VARIABLES: usize = 20;
+const MAX_REFERENCE_CLAUSES: usize = 100_000;
+const MAX_REFERENCE_LITERALS: usize = 1_000_000;
+const MAX_REFERENCE_SEARCH_STEPS: u128 = 50_000_000;
+
+fn model_validation_search_is_bounded(variables: usize, work_items: usize) -> bool {
+    variables <= MAX_REFERENCE_VARIABLES
+        && (1_u128 << variables).saturating_mul(work_items.max(1) as u128)
+            <= MAX_REFERENCE_SEARCH_STEPS
+}
+
 fn model_validation_parse_dimacs_cnf(text: &str) -> Result<(usize, Vec<Vec<i32>>), String> {
     let mut variables = 0_usize;
     let mut clauses = Vec::new();
     let mut pending = Vec::new();
+    let mut declared_counts = None;
+    let mut literal_count = 0_usize;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('c') {
@@ -13458,11 +13471,25 @@ fn model_validation_parse_dimacs_cnf(text: &str) -> Result<(usize, Vec<Vec<i32>>
         }
         if line.starts_with('p') {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                variables = parts[2]
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid DIMACS variable count {:?}", parts[2]))?;
+            if parts.len() != 4 || parts[0] != "p" || !parts[1].eq_ignore_ascii_case("cnf") {
+                return Err("DIMACS header must be 'p cnf <variables> <clauses>'".to_string());
             }
+            if declared_counts.is_some() {
+                return Err("DIMACS must contain exactly one header".to_string());
+            }
+            let declared_variables = parts[2]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid DIMACS variable count {:?}", parts[2]))?;
+            let declared_clauses = parts[3]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid DIMACS clause count {:?}", parts[3]))?;
+            if declared_clauses > MAX_REFERENCE_CLAUSES {
+                return Err(format!(
+                    "DIMACS exceeds the {MAX_REFERENCE_CLAUSES} clause limit"
+                ));
+            }
+            variables = declared_variables;
+            declared_counts = Some((declared_variables, declared_clauses));
             continue;
         }
         for token in line.split_whitespace() {
@@ -13470,15 +13497,46 @@ fn model_validation_parse_dimacs_cnf(text: &str) -> Result<(usize, Vec<Vec<i32>>
                 .parse::<i32>()
                 .map_err(|_| format!("invalid DIMACS literal {token:?}"))?;
             if literal == 0 {
+                if clauses.len() >= MAX_REFERENCE_CLAUSES {
+                    return Err(format!(
+                        "DIMACS exceeds the {MAX_REFERENCE_CLAUSES} clause limit"
+                    ));
+                }
                 clauses.push(std::mem::take(&mut pending));
             } else {
-                variables = variables.max(literal.unsigned_abs() as usize);
+                if literal == i32::MIN {
+                    return Err("DIMACS literal magnitude exceeds i32".to_string());
+                }
+                literal_count += 1;
+                if literal_count > MAX_REFERENCE_LITERALS {
+                    return Err(format!(
+                        "DIMACS exceeds the {MAX_REFERENCE_LITERALS} literal limit"
+                    ));
+                }
+                let literal_variable = literal.unsigned_abs() as usize;
+                if let Some((declared_variables, _)) = declared_counts {
+                    if literal_variable > declared_variables {
+                        return Err(format!(
+                            "DIMACS literal {literal} exceeds declared variable count {declared_variables}"
+                        ));
+                    }
+                }
+                variables = variables.max(literal_variable);
                 pending.push(literal);
             }
         }
     }
     if !pending.is_empty() {
-        clauses.push(pending);
+        return Err("DIMACS final clause must end with 0".to_string());
+    }
+    let Some((_, declared_clauses)) = declared_counts else {
+        return Err("DIMACS is missing a 'p cnf' header".to_string());
+    };
+    if clauses.len() != declared_clauses {
+        return Err(format!(
+            "DIMACS declares {declared_clauses} clauses but contains {}",
+            clauses.len()
+        ));
     }
     Ok((variables, clauses))
 }
@@ -13508,12 +13566,25 @@ fn model_validation_dimacs_reference(payload: &Value) -> Value {
             );
         }
     };
-    if variables > 24 {
+    if variables > MAX_REFERENCE_VARIABLES {
         return model_validation_result(
             "unavailable",
             "unknown",
             "builtin:dimacs-small-cnf",
-            format!("builtin CNF fallback is capped at 24 variables, got {variables}"),
+            format!(
+                "builtin CNF fallback is capped at {MAX_REFERENCE_VARIABLES} variables, got {variables}"
+            ),
+            "",
+            "",
+        );
+    }
+    let literal_count = clauses.iter().map(Vec::len).sum::<usize>();
+    if !model_validation_search_is_bounded(variables, literal_count) {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            "builtin:dimacs-small-cnf",
+            "builtin CNF fallback exceeds its bounded search budget",
             "",
             "",
         );
@@ -13562,6 +13633,8 @@ fn model_validation_parse_wcnf(
     let mut variables = 0_usize;
     let mut top_weight = None;
     let mut clauses = Vec::new();
+    let mut declared_counts = None;
+    let mut literal_count = 0_usize;
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('c') {
@@ -13569,18 +13642,37 @@ fn model_validation_parse_wcnf(
         }
         if line.starts_with('p') {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 && parts[1].eq_ignore_ascii_case("wcnf") {
-                variables = parts[2]
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid WCNF variable count {:?}", parts[2]))?;
-                if parts.len() >= 5 {
-                    top_weight = Some(
-                        parts[4]
-                            .parse::<i64>()
-                            .map_err(|_| format!("invalid WCNF top weight {:?}", parts[4]))?,
-                    );
-                }
+            if !(parts.len() == 4 || parts.len() == 5)
+                || parts[0] != "p"
+                || !parts[1].eq_ignore_ascii_case("wcnf")
+            {
+                return Err("WCNF header must be 'p wcnf <variables> <clauses> [top]'".to_string());
             }
+            if declared_counts.is_some() {
+                return Err("WCNF must contain exactly one header".to_string());
+            }
+            let declared_variables = parts[2]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid WCNF variable count {:?}", parts[2]))?;
+            let declared_clauses = parts[3]
+                .parse::<usize>()
+                .map_err(|_| format!("invalid WCNF clause count {:?}", parts[3]))?;
+            if declared_clauses > MAX_REFERENCE_CLAUSES {
+                return Err(format!(
+                    "WCNF exceeds the {MAX_REFERENCE_CLAUSES} clause limit"
+                ));
+            }
+            if parts.len() == 5 {
+                let parsed_top = parts[4]
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid WCNF top weight {:?}", parts[4]))?;
+                if parsed_top <= 0 {
+                    return Err("WCNF top weight must be positive".to_string());
+                }
+                top_weight = Some(parsed_top);
+            }
+            variables = declared_variables;
+            declared_counts = Some((declared_variables, declared_clauses));
             continue;
         }
         let tokens: Vec<i64> = line
@@ -13595,14 +13687,55 @@ fn model_validation_parse_wcnf(
             return Err("WCNF clauses must be '<weight> <lits...> 0'".to_string());
         }
         let weight = tokens[0];
+        if weight <= 0 {
+            return Err("WCNF clause weights must be positive".to_string());
+        }
         let clause: Vec<i32> = tokens[1..tokens.len() - 1]
             .iter()
-            .map(|literal| *literal as i32)
-            .collect();
+            .map(|literal| {
+                i32::try_from(*literal)
+                    .map_err(|_| format!("WCNF literal {literal} exceeds i32"))
+                    .and_then(|literal| {
+                        if literal == 0 || literal == i32::MIN {
+                            Err("WCNF literals must be non-zero i32 values".to_string())
+                        } else {
+                            Ok(literal)
+                        }
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        literal_count = literal_count.saturating_add(clause.len());
+        if literal_count > MAX_REFERENCE_LITERALS {
+            return Err(format!(
+                "WCNF exceeds the {MAX_REFERENCE_LITERALS} literal limit"
+            ));
+        }
         for literal in &clause {
-            variables = variables.max(literal.unsigned_abs() as usize);
+            let literal_variable = literal.unsigned_abs() as usize;
+            if let Some((declared_variables, _)) = declared_counts {
+                if literal_variable > declared_variables {
+                    return Err(format!(
+                        "WCNF literal {literal} exceeds declared variable count {declared_variables}"
+                    ));
+                }
+            }
+            variables = variables.max(literal_variable);
+        }
+        if clauses.len() >= MAX_REFERENCE_CLAUSES {
+            return Err(format!(
+                "WCNF exceeds the {MAX_REFERENCE_CLAUSES} clause limit"
+            ));
         }
         clauses.push((weight, clause));
+    }
+    let Some((_, declared_clauses)) = declared_counts else {
+        return Err("WCNF is missing a 'p wcnf' header".to_string());
+    };
+    if clauses.len() != declared_clauses {
+        return Err(format!(
+            "WCNF declares {declared_clauses} clauses but contains {}",
+            clauses.len()
+        ));
     }
     Ok((variables, top_weight, clauses))
 }
@@ -13632,21 +13765,37 @@ fn model_validation_wcnf_reference(payload: &Value) -> Value {
             );
         }
     };
-    if variables > 24 {
+    if variables > MAX_REFERENCE_VARIABLES {
         return model_validation_result(
             "unavailable",
             "unknown",
             "builtin:wcnf-small-maxsat",
-            format!("builtin WCNF fallback is capped at 24 variables, got {variables}"),
+            format!(
+                "builtin WCNF fallback is capped at {MAX_REFERENCE_VARIABLES} variables, got {variables}"
+            ),
             "",
             "",
         );
     }
-    let mut best_cost: Option<i64> = None;
+    let literal_count = clauses
+        .iter()
+        .map(|(_, clause)| clause.len())
+        .sum::<usize>();
+    if !model_validation_search_is_bounded(variables, literal_count) {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            "builtin:wcnf-small-maxsat",
+            "builtin WCNF fallback exceeds its bounded search budget",
+            "",
+            "",
+        );
+    }
+    let mut best_cost: Option<i128> = None;
     let mut best_mask = 0_u64;
     for mask in 0..(1_u64 << variables) {
         let mut hard_failed = false;
-        let mut cost = 0_i64;
+        let mut cost = 0_i128;
         for (weight, clause) in &clauses {
             let satisfied = clause.iter().any(|literal| {
                 let var = literal.unsigned_abs() as usize - 1;
@@ -13660,7 +13809,7 @@ fn model_validation_wcnf_reference(payload: &Value) -> Value {
                 hard_failed = true;
                 break;
             }
-            cost += *weight;
+            cost += i128::from(*weight);
         }
         if hard_failed {
             continue;
@@ -13966,6 +14115,7 @@ fn model_validation_parse_opb(
 ) -> Result<(Vec<String>, Vec<(Vec<(i64, String)>, String, i64)>), String> {
     let mut variables = BTreeMap::new();
     let mut constraints = Vec::new();
+    let mut term_count = 0_usize;
     for raw_line in text.lines() {
         let line = raw_line.trim().trim_end_matches(';').trim();
         if line.is_empty() || line.starts_with('*') {
@@ -13998,8 +14148,24 @@ fn model_validation_parse_opb(
                 .parse::<i64>()
                 .map_err(|_| format!("unsupported OPB coefficient {:?}", pair[0]))?;
             let name = pair[1].to_string();
+            if name.len() > 128
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            {
+                return Err(format!("unsupported OPB variable name {name:?}"));
+            }
             variables.insert(name.clone(), ());
             terms.push((coeff, name));
+            term_count = term_count.saturating_add(1);
+            if variables.len() > MAX_REFERENCE_LITERALS || term_count > MAX_REFERENCE_LITERALS {
+                return Err("OPB term limit exceeded".to_string());
+            }
+        }
+        if constraints.len() >= MAX_REFERENCE_CLAUSES {
+            return Err(format!(
+                "OPB exceeds the {MAX_REFERENCE_CLAUSES} constraint limit"
+            ));
         }
         constraints.push((terms, op.to_string(), rhs));
     }
@@ -14014,13 +14180,13 @@ fn model_validation_opb_constraint_satisfied(
     assignment: &BTreeMap<String, bool>,
 ) -> bool {
     let (terms, op, rhs) = constraint;
-    let total = terms.iter().fold(0_i64, |acc, (coeff, name)| {
-        acc + coeff * i64::from(*assignment.get(name).unwrap_or(&false))
+    let total = terms.iter().fold(0_i128, |acc, (coeff, name)| {
+        acc + i128::from(*coeff) * i128::from(*assignment.get(name).unwrap_or(&false))
     });
     match op.as_str() {
-        ">=" => total >= *rhs,
-        "<=" => total <= *rhs,
-        _ => total == *rhs,
+        ">=" => total >= i128::from(*rhs),
+        "<=" => total <= i128::from(*rhs),
+        _ => total == i128::from(*rhs),
     }
 }
 
@@ -14049,15 +14215,29 @@ fn model_validation_opb_reference(payload: &Value) -> Value {
             );
         }
     };
-    if variables.len() > 24 {
+    if variables.len() > MAX_REFERENCE_VARIABLES {
         return model_validation_result(
             "unavailable",
             "unknown",
             "builtin:opb-small-pb",
             format!(
-                "builtin OPB fallback is capped at 24 variables, got {}",
+                "builtin OPB fallback is capped at {MAX_REFERENCE_VARIABLES} variables, got {}",
                 variables.len()
             ),
+            "",
+            "",
+        );
+    }
+    let term_count = constraints
+        .iter()
+        .map(|(terms, _, _)| terms.len())
+        .sum::<usize>();
+    if !model_validation_search_is_bounded(variables.len(), term_count) {
+        return model_validation_result(
+            "unavailable",
+            "unknown",
+            "builtin:opb-small-pb",
+            "builtin OPB fallback exceeds its bounded search budget",
             "",
             "",
         );
@@ -14959,9 +15139,16 @@ fn proof_validation_result(
     Value::Object(output)
 }
 
-fn proof_validation_cnf_model(variables: usize, clauses: &[Vec<i32>]) -> Option<Vec<i32>> {
-    if variables > 20 {
-        return None;
+enum ProofSearch<T> {
+    Sat(T),
+    Unsat,
+    Unavailable,
+}
+
+fn proof_validation_cnf_model(variables: usize, clauses: &[Vec<i32>]) -> ProofSearch<Vec<i32>> {
+    let literal_count = clauses.iter().map(Vec::len).sum::<usize>();
+    if !model_validation_search_is_bounded(variables, literal_count) {
+        return ProofSearch::Unavailable;
     }
     for mask in 0..(1_u64 << variables) {
         let satisfied = clauses.iter().all(|clause| {
@@ -14972,7 +15159,7 @@ fn proof_validation_cnf_model(variables: usize, clauses: &[Vec<i32>]) -> Option<
             })
         });
         if satisfied {
-            return Some(
+            return ProofSearch::Sat(
                 (0..variables)
                     .map(|idx| {
                         if ((mask >> idx) & 1) == 1 {
@@ -14985,7 +15172,7 @@ fn proof_validation_cnf_model(variables: usize, clauses: &[Vec<i32>]) -> Option<
             );
         }
     }
-    None
+    ProofSearch::Unsat
 }
 
 fn proof_validation_drat_has_empty_clause(proof: &str) -> bool {
@@ -15037,9 +15224,13 @@ fn proof_validation_frat_has_empty_clause(proof: &str) -> bool {
 fn proof_validation_pb_model(
     variables: &[String],
     constraints: &[(Vec<(i64, String)>, String, i64)],
-) -> Option<BTreeMap<String, i32>> {
-    if variables.len() > 20 {
-        return None;
+) -> ProofSearch<BTreeMap<String, i32>> {
+    let term_count = constraints
+        .iter()
+        .map(|(terms, _, _)| terms.len())
+        .sum::<usize>();
+    if !model_validation_search_is_bounded(variables.len(), term_count) {
+        return ProofSearch::Unavailable;
     }
     for mask in 0..(1_u64 << variables.len()) {
         let assignment: BTreeMap<String, bool> = variables
@@ -15051,7 +15242,7 @@ fn proof_validation_pb_model(
             .iter()
             .all(|constraint| model_validation_opb_constraint_satisfied(constraint, &assignment))
         {
-            return Some(
+            return ProofSearch::Sat(
                 variables
                     .iter()
                     .map(|name| {
@@ -15064,7 +15255,7 @@ fn proof_validation_pb_model(
             );
         }
     }
-    None
+    ProofSearch::Unsat
 }
 
 fn proof_validation_veripb_has_derivation(proof: &str) -> bool {
@@ -15154,15 +15345,28 @@ pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str
                 );
             }
         };
-        if let Some(model) = proof_validation_pb_model(&variables, &constraints) {
-            return proof_validation_result(
-                &tool,
-                &validator,
-                "ok",
-                "invalid",
-                "OPB model is satisfiable; proof cannot validate infeasibility",
-                vec![("pb_status", json!("sat")), ("witness", json!(model))],
-            );
+        match proof_validation_pb_model(&variables, &constraints) {
+            ProofSearch::Sat(model) => {
+                return proof_validation_result(
+                    &tool,
+                    &validator,
+                    "ok",
+                    "invalid",
+                    "OPB model is satisfiable; proof cannot validate infeasibility",
+                    vec![("pb_status", json!("sat")), ("witness", json!(model))],
+                );
+            }
+            ProofSearch::Unavailable => {
+                return proof_validation_result(
+                    &tool,
+                    &validator,
+                    "unavailable",
+                    "unknown",
+                    "OPB proof exceeds the bounded reference search budget",
+                    vec![("pb_status", json!("unknown"))],
+                );
+            }
+            ProofSearch::Unsat => {}
         }
         if proof_validation_veripb_has_derivation(proof) {
             proof_validation_result(
@@ -15211,15 +15415,28 @@ pub fn run_proof_validation_json_with_rust_reference(payload: &Value, tool: &str
                 );
             }
         };
-        if let Some(model) = proof_validation_cnf_model(variables, &clauses) {
-            return proof_validation_result(
-                &tool,
-                &validator,
-                "ok",
-                "invalid",
-                "CNF is satisfiable; unsat proof cannot validate",
-                vec![("cnf_status", json!("sat")), ("witness", json!(model))],
-            );
+        match proof_validation_cnf_model(variables, &clauses) {
+            ProofSearch::Sat(model) => {
+                return proof_validation_result(
+                    &tool,
+                    &validator,
+                    "ok",
+                    "invalid",
+                    "CNF is satisfiable; unsat proof cannot validate",
+                    vec![("cnf_status", json!("sat")), ("witness", json!(model))],
+                );
+            }
+            ProofSearch::Unavailable => {
+                return proof_validation_result(
+                    &tool,
+                    &validator,
+                    "unavailable",
+                    "unknown",
+                    "CNF proof exceeds the bounded reference search budget",
+                    vec![("cnf_status", json!("unknown"))],
+                );
+            }
+            ProofSearch::Unsat => {}
         }
         let has_empty_clause = if proof_validation_is_lrat_tool(&tool) {
             proof_validation_lrat_has_empty_clause(proof)
@@ -20968,10 +21185,10 @@ fn resolve_command_path(command: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        external_validation_python_import_probe_value_enabled,
-        probe_java_classpath_validation_tool, probe_node_validation_package_with_command,
-        probe_python_validation_package_with_command, probe_rust_crate_validation_tool,
-        probe_unconfigured_proof_or_formal_rust_reference_tool,
+        external_validation_python_import_probe_value_enabled, model_validation_parse_dimacs_cnf,
+        model_validation_parse_wcnf, probe_java_classpath_validation_tool,
+        probe_node_validation_package_with_command, probe_python_validation_package_with_command,
+        probe_rust_crate_validation_tool, probe_unconfigured_proof_or_formal_rust_reference_tool,
         simulation_validation_force_python_value_enabled, wait_for_external_validation_output,
     };
     use crate::des::general::external_validation_tools::{
@@ -24419,6 +24636,43 @@ mod tests {
             veripb["validator"].as_str(),
             Some("builtin:small-opb-proof-for-veripb-checker")
         );
+    }
+
+    #[test]
+    fn proof_checkers_fail_closed_when_reference_search_is_too_large() {
+        let cnf = run_proof_validation_json_with_rust_reference(
+            &json!({
+                "cnf": "p cnf 21 1\n21 0\n",
+                "proof": "0\n",
+            }),
+            "drat",
+        );
+        assert_eq!(cnf["status"].as_str(), Some("unavailable"));
+        assert_eq!(cnf["verdict"].as_str(), Some("unknown"));
+        assert_eq!(cnf["cnf_status"].as_str(), Some("unknown"));
+
+        let terms = (1..=21)
+            .map(|index| format!("1 x{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let opb = run_proof_validation_json_with_rust_reference(
+            &json!({
+                "kind": "opb-proof-validation",
+                "opb": format!("{terms} >= 1;\n"),
+                "proof": "1 >= 1 ;\n",
+            }),
+            "veripb",
+        );
+        assert_eq!(opb["status"].as_str(), Some("unavailable"));
+        assert_eq!(opb["verdict"].as_str(), Some("unknown"));
+        assert_eq!(opb["pb_status"].as_str(), Some("unknown"));
+    }
+
+    #[test]
+    fn dimacs_parsers_reject_inconsistent_headers_and_overflowing_literals() {
+        assert!(model_validation_parse_dimacs_cnf("p cnf 1 2\n1 0\n").is_err());
+        assert!(model_validation_parse_dimacs_cnf("p cnf 1 1\n2 0\n").is_err());
+        assert!(model_validation_parse_wcnf("p wcnf 1 1 10\n2 2147483648 0\n").is_err());
     }
 
     #[test]

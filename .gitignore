@@ -7,3 +7,7 @@ __pycache__/
 
 # SMACK / LLVM bitcode build artifacts
 *.bc
+tmp
+temp
+tmp/worktrees
+temp/worktrees

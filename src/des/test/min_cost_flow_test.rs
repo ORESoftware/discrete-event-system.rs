@@ -67,11 +67,12 @@ mod tests {
         let external = solve_lp_external(
             &lp,
             &ExternalSolverOptions {
-                method: Some("highs".to_string()),
+                method: Some("simplex".to_string()),
                 ..Default::default()
             },
         );
         assert_eq!(external.status, LPStatus::Optimal, "{:?}", external.message);
+        assert_eq!(external.solver, "rust:lp-fallback-for-scipy:simplex");
         assert!((external.objective - flow.total_cost).abs() < 1e-8);
     }
 }

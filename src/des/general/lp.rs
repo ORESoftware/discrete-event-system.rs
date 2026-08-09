@@ -638,6 +638,54 @@ pub struct LPSolution {
     pub message: Option<String>,
 }
 
+/// Clarabel's solver-specific termination classes.  This is deliberately more
+/// expressive than [`LPStatus`]: reduced-accuracy feasibility or optimality is
+/// not promoted to a conclusive LP result, and iteration and time limits stay
+/// distinguishable for service policy and branch-and-bound callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClarabelTermination {
+    FullAccuracy,
+    ReducedAccuracy,
+    IterationLimit,
+    TimeLimit,
+    Infeasible,
+    Unbounded,
+    NumericalFailure,
+}
+
+impl ClarabelTermination {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClarabelTermination::FullAccuracy => "full-accuracy",
+            ClarabelTermination::ReducedAccuracy => "reduced-accuracy",
+            ClarabelTermination::IterationLimit => "iteration-limit",
+            ClarabelTermination::TimeLimit => "time-limit",
+            ClarabelTermination::Infeasible => "infeasible",
+            ClarabelTermination::Unbounded => "unbounded",
+            ClarabelTermination::NumericalFailure => "numerical-failure",
+        }
+    }
+}
+
+/// Solver-specific quality evidence for a Clarabel solve.
+///
+/// `conservative_bound` is present only for an explicitly revalidated
+/// full-accuracy result.  For minimization it is widened downward; for
+/// maximization it is widened upward.  Reduced-accuracy and interrupted solves
+/// therefore cannot accidentally become exact MIP node bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClarabelSolveReport {
+    pub solution: LPSolution,
+    pub termination: ClarabelTermination,
+    pub primal_objective: Option<f64>,
+    pub dual_objective: Option<f64>,
+    pub conservative_bound: Option<f64>,
+    pub primal_residual: Option<f64>,
+    pub dual_residual: Option<f64>,
+    pub absolute_gap: Option<f64>,
+    pub relative_gap: Option<f64>,
+}
+
 // -----------------------------------------------------------------------------
 // In-process two-phase simplex.
 // -----------------------------------------------------------------------------
@@ -3685,10 +3733,14 @@ pub fn solve_lp_internal_ipm(p: &LPProblem, opts: &InternalInteriorPointOptions)
 /// LP has no quadratic term, so `P = 0`. `Sense::Max` is handled by negating
 /// the linear objective and reporting the original `c'x`.
 pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
+    solve_lp_clarabel_report(p).solution
+}
+
+/// Solve an LP with Clarabel and retain solver termination and numerical
+/// quality evidence separately from the generic [`LPSolution`] contract.
+pub fn solve_lp_clarabel_report(p: &LPProblem) -> ClarabelSolveReport {
     use clarabel::algebra::CscMatrix;
-    use clarabel::solver::{
-        DefaultSettingsBuilder, DefaultSolver, IPSolver, SolverStatus, SupportedConeT,
-    };
+    use clarabel::solver::{DefaultSettingsBuilder, DefaultSolver, IPSolver, SupportedConeT};
     let t0 = Instant::now();
     validate_lp_dimensions(p);
     let n = p.c.len();
@@ -3696,13 +3748,16 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     for j in 0..n {
         if let (Some(lower), Some(upper)) = (lb[j], ub[j]) {
             if lower > upper {
-                return empty_lp_solution(
-                    LPStatus::Infeasible,
-                    "clarabel",
-                    t0,
-                    Some(format!(
-                        "clarabel bound validation failed: lb[{j}]={lower} exceeds ub[{j}]={upper}"
-                    )),
+                return empty_clarabel_report(
+                    empty_lp_solution(
+                        LPStatus::Infeasible,
+                        "clarabel",
+                        t0,
+                        Some(format!(
+                            "clarabel bound validation failed: lb[{j}]={lower} exceeds ub[{j}]={upper}"
+                        )),
+                    ),
+                    ClarabelTermination::Infeasible,
                 );
             }
         }
@@ -3767,25 +3822,44 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
     let mut solver = match DefaultSolver::new(&p_mat, &q, &a_mat, &b, &cones, settings) {
         Ok(s) => s,
         Err(_) => {
-            return empty_lp_solution(
-                LPStatus::NumericalError,
-                "clarabel",
-                t0,
-                Some("clarabel solver construction failed".to_string()),
+            return empty_clarabel_report(
+                empty_lp_solution(
+                    LPStatus::NumericalError,
+                    "clarabel",
+                    t0,
+                    Some("clarabel solver construction failed".to_string()),
+                ),
+                ClarabelTermination::NumericalFailure,
             )
         }
     };
     solver.solve();
     let solution = &solver.solution;
-    let status = match solution.status {
-        SolverStatus::Solved | SolverStatus::AlmostSolved => LPStatus::Optimal,
-        SolverStatus::PrimalInfeasible | SolverStatus::AlmostPrimalInfeasible => {
-            LPStatus::Infeasible
-        }
-        SolverStatus::DualInfeasible | SolverStatus::AlmostDualInfeasible => LPStatus::Unbounded,
-        SolverStatus::MaxIterations => LPStatus::IterLimit,
-        _ => LPStatus::NumericalError,
-    };
+    let settings = solver.settings();
+    let original_primal_residual = clarabel_original_primal_residual(p, &solution.x, &lb, &ub);
+    let primal_residual = original_primal_residual.max(solution.r_prim.abs());
+    let dual_residual = solution.r_dual.abs();
+    let absolute_gap = (solution.obj_val - solution.obj_val_dual).abs();
+    let gap_scale = 1.0_f64
+        .max(solution.obj_val.abs())
+        .max(solution.obj_val_dual.abs());
+    let relative_gap = absolute_gap / gap_scale;
+    let quality_is_finite = [
+        primal_residual,
+        dual_residual,
+        absolute_gap,
+        relative_gap,
+        solution.obj_val,
+        solution.obj_val_dual,
+    ]
+    .iter()
+    .all(|value| value.is_finite());
+    let meets_full_accuracy = quality_is_finite
+        && primal_residual <= settings.tol_feas
+        && dual_residual <= settings.tol_feas
+        && (absolute_gap <= settings.tol_gap_abs || relative_gap <= settings.tol_gap_rel);
+    let termination = clarabel_termination(solution.status, meets_full_accuracy);
+    let status = clarabel_lp_status(termination);
     let x = if status == LPStatus::Optimal {
         solution.x.clone()
     } else {
@@ -3802,7 +3876,34 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
         }
         _ => f64::NAN,
     };
-    LPSolution {
+    let primal_objective = solution.obj_val.is_finite().then_some(if maximize {
+        -solution.obj_val
+    } else {
+        solution.obj_val
+    });
+    let dual_objective = solution.obj_val_dual.is_finite().then_some(if maximize {
+        -solution.obj_val_dual
+    } else {
+        solution.obj_val_dual
+    });
+    let conservative_bound = clarabel_certified_bound(
+        termination,
+        p.sense,
+        primal_objective,
+        dual_objective,
+        primal_residual,
+        dual_residual,
+        absolute_gap,
+        relative_gap,
+    );
+    let message = Some(format!(
+        "clarabel termination={}; primal_residual={primal_residual:.3e}; dual_residual={dual_residual:.3e}; absolute_gap={absolute_gap:.3e}; relative_gap={relative_gap:.3e}; conservative_bound={}",
+        termination.as_str(),
+        conservative_bound
+            .map(|bound| format!("{bound:.17}"))
+            .unwrap_or_else(|| "unavailable".to_string())
+    ));
+    let generic_solution = LPSolution {
         status,
         x,
         objective,
@@ -3816,8 +3917,175 @@ pub fn solve_lp_clarabel(p: &LPProblem) -> LPSolution {
         iters: Some(solution.iterations as usize),
         solver: "clarabel".to_string(),
         elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
-        message: None,
+        message,
+    };
+    ClarabelSolveReport {
+        solution: generic_solution,
+        termination,
+        primal_objective,
+        dual_objective,
+        conservative_bound,
+        primal_residual: primal_residual.is_finite().then_some(primal_residual),
+        dual_residual: dual_residual.is_finite().then_some(dual_residual),
+        absolute_gap: absolute_gap.is_finite().then_some(absolute_gap),
+        relative_gap: relative_gap.is_finite().then_some(relative_gap),
     }
+}
+
+fn empty_clarabel_report(
+    solution: LPSolution,
+    termination: ClarabelTermination,
+) -> ClarabelSolveReport {
+    ClarabelSolveReport {
+        solution,
+        termination,
+        primal_objective: None,
+        dual_objective: None,
+        conservative_bound: None,
+        primal_residual: None,
+        dual_residual: None,
+        absolute_gap: None,
+        relative_gap: None,
+    }
+}
+
+fn clarabel_termination(
+    status: clarabel::solver::SolverStatus,
+    meets_full_accuracy: bool,
+) -> ClarabelTermination {
+    use clarabel::solver::SolverStatus;
+    match status {
+        SolverStatus::Solved if meets_full_accuracy => ClarabelTermination::FullAccuracy,
+        SolverStatus::Solved => ClarabelTermination::NumericalFailure,
+        SolverStatus::AlmostSolved
+        | SolverStatus::AlmostPrimalInfeasible
+        | SolverStatus::AlmostDualInfeasible => ClarabelTermination::ReducedAccuracy,
+        SolverStatus::PrimalInfeasible => ClarabelTermination::Infeasible,
+        SolverStatus::DualInfeasible => ClarabelTermination::Unbounded,
+        SolverStatus::MaxIterations => ClarabelTermination::IterationLimit,
+        SolverStatus::MaxTime => ClarabelTermination::TimeLimit,
+        SolverStatus::Unsolved
+        | SolverStatus::NumericalError
+        | SolverStatus::InsufficientProgress
+        | SolverStatus::CallbackTerminated => ClarabelTermination::NumericalFailure,
+    }
+}
+
+fn clarabel_lp_status(termination: ClarabelTermination) -> LPStatus {
+    match termination {
+        ClarabelTermination::FullAccuracy => LPStatus::Optimal,
+        ClarabelTermination::Infeasible => LPStatus::Infeasible,
+        ClarabelTermination::Unbounded => LPStatus::Unbounded,
+        ClarabelTermination::IterationLimit
+        | ClarabelTermination::TimeLimit
+        | ClarabelTermination::ReducedAccuracy => LPStatus::IterLimit,
+        ClarabelTermination::NumericalFailure => LPStatus::NumericalError,
+    }
+}
+
+fn clarabel_original_primal_residual(
+    p: &LPProblem,
+    x: &[f64],
+    lb: &[Option<f64>],
+    ub: &[Option<f64>],
+) -> f64 {
+    if x.len() != p.c.len() || x.iter().any(|value| !value.is_finite()) {
+        return f64::INFINITY;
+    }
+    let mut residual = 0.0_f64;
+    if let (Some(rows), Some(rhs)) = (p.a_ub.as_ref(), p.b_ub.as_ref()) {
+        for (row, bound) in rows.iter().zip(rhs.iter()) {
+            let lhs = row
+                .iter()
+                .zip(x.iter())
+                .map(|(a, value)| a * value)
+                .sum::<f64>();
+            let scale = 1.0_f64.max(lhs.abs()).max(bound.abs());
+            residual = residual.max((lhs - bound).max(0.0) / scale);
+        }
+    }
+    if let (Some(rows), Some(rhs)) = (p.a_eq.as_ref(), p.b_eq.as_ref()) {
+        for (row, target) in rows.iter().zip(rhs.iter()) {
+            let lhs = row
+                .iter()
+                .zip(x.iter())
+                .map(|(a, value)| a * value)
+                .sum::<f64>();
+            let scale = 1.0_f64.max(lhs.abs()).max(target.abs());
+            residual = residual.max((lhs - target).abs() / scale);
+        }
+    }
+    for (index, value) in x.iter().enumerate() {
+        if let Some(lower) = lb[index] {
+            let scale = 1.0_f64.max(value.abs()).max(lower.abs());
+            residual = residual.max((lower - value).max(0.0) / scale);
+        }
+        if let Some(upper) = ub[index] {
+            let scale = 1.0_f64.max(value.abs()).max(upper.abs());
+            residual = residual.max((value - upper).max(0.0) / scale);
+        }
+    }
+    residual
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clarabel_certified_bound(
+    termination: ClarabelTermination,
+    sense: Sense,
+    primal_objective: Option<f64>,
+    dual_objective: Option<f64>,
+    primal_residual: f64,
+    dual_residual: f64,
+    absolute_gap: f64,
+    relative_gap: f64,
+) -> Option<f64> {
+    if termination != ClarabelTermination::FullAccuracy {
+        return None;
+    }
+    clarabel_conservative_bound(
+        sense,
+        primal_objective,
+        dual_objective,
+        primal_residual,
+        dual_residual,
+        absolute_gap,
+        relative_gap,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clarabel_conservative_bound(
+    sense: Sense,
+    primal_objective: Option<f64>,
+    dual_objective: Option<f64>,
+    primal_residual: f64,
+    dual_residual: f64,
+    absolute_gap: f64,
+    relative_gap: f64,
+) -> Option<f64> {
+    let primal = primal_objective?;
+    let dual = dual_objective?;
+    if ![
+        primal,
+        dual,
+        primal_residual,
+        dual_residual,
+        absolute_gap,
+        relative_gap,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+    {
+        return None;
+    }
+    let objective_scale = 1.0_f64.max(primal.abs()).max(dual.abs());
+    let guard = absolute_gap
+        .max(relative_gap * objective_scale)
+        .max((primal_residual + dual_residual) * objective_scale);
+    Some(match sense {
+        Sense::Min => dual.min(primal) - guard,
+        Sense::Max => dual.max(primal) + guard,
+    })
 }
 
 /// Convert dense constraint rows to a Clarabel CSC matrix (column-major).
@@ -6276,6 +6544,144 @@ mod tests {
             .message
             .as_deref()
             .is_some_and(|message| message.contains("bound validation failed")));
+    }
+
+    #[test]
+    fn clarabel_terminal_statuses_remain_semantically_distinct() {
+        use clarabel::solver::SolverStatus;
+
+        assert_eq!(
+            clarabel_termination(SolverStatus::Solved, true),
+            ClarabelTermination::FullAccuracy
+        );
+        assert_eq!(
+            clarabel_termination(SolverStatus::Solved, false),
+            ClarabelTermination::NumericalFailure
+        );
+        for status in [
+            SolverStatus::AlmostSolved,
+            SolverStatus::AlmostPrimalInfeasible,
+            SolverStatus::AlmostDualInfeasible,
+        ] {
+            assert_eq!(
+                clarabel_termination(status, true),
+                ClarabelTermination::ReducedAccuracy
+            );
+        }
+        assert_eq!(
+            clarabel_termination(SolverStatus::MaxIterations, false),
+            ClarabelTermination::IterationLimit
+        );
+        assert_eq!(
+            clarabel_termination(SolverStatus::MaxTime, false),
+            ClarabelTermination::TimeLimit
+        );
+        assert_eq!(
+            clarabel_termination(SolverStatus::PrimalInfeasible, false),
+            ClarabelTermination::Infeasible
+        );
+        assert_eq!(
+            clarabel_termination(SolverStatus::DualInfeasible, false),
+            ClarabelTermination::Unbounded
+        );
+        for status in [
+            SolverStatus::Unsolved,
+            SolverStatus::NumericalError,
+            SolverStatus::InsufficientProgress,
+            SolverStatus::CallbackTerminated,
+        ] {
+            assert_eq!(
+                clarabel_termination(status, false),
+                ClarabelTermination::NumericalFailure
+            );
+        }
+    }
+
+    #[test]
+    fn clarabel_reduced_accuracy_cannot_prune_a_near_integral_candidate() {
+        let near_integral_primal = 0.999_999_9;
+        let termination = ClarabelTermination::ReducedAccuracy;
+
+        assert_eq!(clarabel_lp_status(termination), LPStatus::IterLimit);
+        assert_eq!(
+            clarabel_certified_bound(
+                termination,
+                Sense::Min,
+                Some(near_integral_primal),
+                Some(1.0),
+                1e-9,
+                1e-9,
+                1e-7,
+                1e-7,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clarabel_certified_bounds_widen_in_the_safe_direction() {
+        let min_bound = clarabel_certified_bound(
+            ClarabelTermination::FullAccuracy,
+            Sense::Min,
+            Some(10.000_000_2),
+            Some(9.999_999_8),
+            1e-9,
+            2e-9,
+            4e-7,
+            4e-8,
+        )
+        .expect("full-accuracy minimization bound");
+        let max_bound = clarabel_certified_bound(
+            ClarabelTermination::FullAccuracy,
+            Sense::Max,
+            Some(9.999_999_8),
+            Some(10.000_000_2),
+            1e-9,
+            2e-9,
+            4e-7,
+            4e-8,
+        )
+        .expect("full-accuracy maximization bound");
+
+        assert!(min_bound < 9.999_999_8, "bound={min_bound:.17}");
+        assert!(max_bound > 10.000_000_2, "bound={max_bound:.17}");
+    }
+
+    #[test]
+    fn clarabel_reports_revalidated_min_and_max_bounds() {
+        let min_problem = LPProblem {
+            sense: Sense::Min,
+            c: vec![1.0],
+            a_ub: Some(vec![vec![-1.0]]),
+            b_ub: Some(vec![-2.0]),
+            ..Default::default()
+        };
+        let max_problem = LPProblem {
+            sense: Sense::Max,
+            c: vec![1.0],
+            ub: Some(vec![Some(4.0)]),
+            ..Default::default()
+        };
+
+        let min_report = solve_lp_clarabel_report(&min_problem);
+        let max_report = solve_lp_clarabel_report(&max_problem);
+
+        assert_eq!(
+            min_report.termination,
+            ClarabelTermination::FullAccuracy,
+            "{:?}",
+            min_report.solution.message
+        );
+        assert_eq!(
+            max_report.termination,
+            ClarabelTermination::FullAccuracy,
+            "{:?}",
+            max_report.solution.message
+        );
+        assert!(min_report.conservative_bound.expect("min bound") <= min_report.solution.objective);
+        assert!(max_report.conservative_bound.expect("max bound") >= max_report.solution.objective);
+        assert!(min_report.primal_residual.is_some_and(f64::is_finite));
+        assert!(max_report.dual_residual.is_some_and(f64::is_finite));
     }
 
     #[test]

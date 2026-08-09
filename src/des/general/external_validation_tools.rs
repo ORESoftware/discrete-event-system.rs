@@ -20083,6 +20083,17 @@ pub fn external_validation_adapter_command_with_options(
         .or_else(|| external_validation_adapter_command(tool))
 }
 
+fn explicitly_configured_external_validation_adapter_command(
+    tool: &ExternalValidationToolSpec,
+    opts: &ExternalValidationAdapterOptions,
+) -> Option<PathBuf> {
+    opts.command_path
+        .as_ref()
+        .cloned()
+        .or_else(|| configured_adapter_command(tool).0)
+        .or_else(|| find_first_command_in_install_dirs(tool))
+}
+
 pub fn probe_external_validation_tool(
     tool: &ExternalValidationToolSpec,
 ) -> ExternalValidationProbe {
@@ -20307,23 +20318,26 @@ pub fn run_external_validation_adapter(
             message: format!("unknown external validation tool '{}'", opts.tool_id),
         };
     };
-    let Some(command) = external_validation_adapter_command_with_options(opts) else {
-        if let Some(run) = run_external_validation_adapter_with_rust_reference(input, tool) {
-            return run;
-        }
-        return ExternalValidationRun {
-            tool_id: tool.id.to_string(),
-            status: ExternalValidationRunStatus::Unavailable,
-            output: None,
-            elapsed_ms: 0.0,
-            message: format!(
-                "{} adapter command not configured; set {}",
-                tool.display_name,
-                external_validation_adapter_env_names(tool)[0]
-            ),
-        };
-    };
-    run_json_adapter(input, tool, command, opts)
+    if let Some(command) = explicitly_configured_external_validation_adapter_command(tool, opts) {
+        return run_json_adapter(input, tool, command, opts);
+    }
+    if let Some(run) = run_external_validation_adapter_with_rust_reference(input, tool) {
+        return run;
+    }
+    if let Some(command) = find_first_command(tool.command_aliases) {
+        return run_json_adapter(input, tool, command, opts);
+    }
+    ExternalValidationRun {
+        tool_id: tool.id.to_string(),
+        status: ExternalValidationRunStatus::Unavailable,
+        output: None,
+        elapsed_ms: 0.0,
+        message: format!(
+            "{} adapter command not configured; set {}",
+            tool.display_name,
+            external_validation_adapter_env_names(tool)[0]
+        ),
+    }
 }
 
 fn run_external_validation_adapter_with_rust_reference(
@@ -21235,7 +21249,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
 
-    use crate::des::shared::test_support::ENV_LOCK as SIMULATION_VALIDATION_PYTHON_ENV_LOCK;
+    use crate::des::shared::test_support::ENV_LOCK as EXTERNAL_VALIDATION_ENV_LOCK;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -21426,6 +21440,9 @@ mod tests {
 
     #[test]
     fn generic_adapter_run_uses_rust_output_reference_without_python_or_command() {
+        let _lock = EXTERNAL_VALIDATION_ENV_LOCK
+            .lock()
+            .expect("lock external validation environment");
         let tool = find_external_validation_tool("json-schema").unwrap();
         let run = run_external_validation_adapter(
             &json!({
@@ -21446,6 +21463,22 @@ mod tests {
             output["validator"].as_str(),
             Some("builtin:json-schema-subset")
         );
+    }
+
+    #[test]
+    fn generic_adapter_explicit_command_still_overrides_the_rust_reference() {
+        let tool = find_external_validation_tool("json-schema").unwrap();
+        let input = json!({"explicit_adapter": true});
+        let run = run_external_validation_adapter(
+            &input,
+            &ExternalValidationAdapterOptions {
+                command_path: Some(PathBuf::from("/bin/cat")),
+                ..ExternalValidationAdapterOptions::for_tool(tool)
+            },
+        );
+
+        assert_eq!(run.status, ExternalValidationRunStatus::Ok);
+        assert_eq!(run.output, Some(input));
     }
 
     #[test]
@@ -25966,7 +25999,7 @@ mod tests {
 
     #[test]
     fn simulation_validation_python_named_reference_defaults_to_rust_without_python() {
-        let _lock = SIMULATION_VALIDATION_PYTHON_ENV_LOCK
+        let _lock = EXTERNAL_VALIDATION_ENV_LOCK
             .lock()
             .expect("lock simulation validation python env");
         let _python_guard = EnvVarGuard::set(

@@ -23,6 +23,7 @@
 
 #![cfg(test)]
 
+use std::ffi::{OsStr, OsString};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// A process-global, poison-tolerant lock serializing every test that mutates
@@ -55,6 +56,32 @@ impl EnvLock {
 /// test module aliases this under its own former lock name.
 pub static ENV_LOCK: EnvLock = EnvLock::new();
 
+/// Restores one process-global environment variable when it leaves scope.
+///
+/// Callers must hold [`ENV_LOCK`] for the guard's entire lifetime so parallel
+/// tests cannot observe the temporary value or overwrite its saved state.
+pub struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    pub fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => std::env::set_var(self.key, previous),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +97,20 @@ mod tests {
         // Would be Err(PoisonError) with a plain Mutex; here it recovers.
         let guard = ENV_LOCK.lock();
         assert!(guard.is_ok(), "poisoned lock should recover, not cascade");
+    }
+
+    #[test]
+    fn env_guard_restores_the_previous_value() {
+        let _lock = ENV_LOCK.lock().expect("lock environment");
+        let key = "DES_TEST_SUPPORT_ENV_GUARD";
+        let previous = std::env::var_os(key);
+        {
+            let _guard = EnvVarGuard::set(key, "temporary");
+            assert_eq!(
+                std::env::var_os(key).as_deref(),
+                Some(OsStr::new("temporary"))
+            );
+        }
+        assert_eq!(std::env::var_os(key), previous);
     }
 }

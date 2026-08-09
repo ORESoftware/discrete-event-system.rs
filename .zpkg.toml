@@ -1,0 +1,28 @@
+[package]
+org = "oresoftware"
+name = "discrete-event-system-rs"
+version = "0.0.2"
+description = "Rust SDK for discrete, continuous, and mixed-system modeling, simulation, optimization, and rendering"
+license = "MIT OR Apache-2.0"
+keywords = ["simulation", "discrete-event", "control-systems", "mdp", "solver"]
+language = "rust"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/ORESoftware/discrete-event-system.rs"
+
+[publish]
+include_readme = true
+tag_format = "v{version}"
+smoke_test = "cargo test --manifest-path \"$ZED_PKG_TEST_TARGET/Cargo.toml\" --lib --locked"
+exclude = [".env", ".env.*", ".direnv/**", ".zed/**", ".zed-pack/**", "target/**", "out/**", "tmp/**", "**/*.log", ".DS_Store"]
+
+[publish.native]
+registry = "crates-io"
+package = "des_engine"
+
+[install]
+adapter = "rust"
+
+[scripts]
+test = "cargo test --lib --locked"

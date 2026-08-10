@@ -364,6 +364,7 @@ where
 mod tests {
     use super::*;
     use crate::des::general::value_iteration::{MDPSpec, Outcome};
+    use crate::des::shared::test_support::{EnvVarGuard, ENV_LOCK};
 
     /// Two independent self-loop states: V(s) = r(s) / (1 − γ).
     fn self_loop_spec(rewards: [f64; 2]) -> MDPSpec {
@@ -403,7 +404,8 @@ mod tests {
     #[test]
     fn solve_mdp_as_lp_matches_closed_form() {
         // Force the in-process simplex so the test needs no python/scipy.
-        std::env::set_var("LP_SOLVER", "internal");
+        let _lock = ENV_LOCK.lock().expect("lock LP solver environment");
+        let _solver = EnvVarGuard::set("LP_SOLVER", "internal");
         let sol = solve_mdp_as_lp(&self_loop_spec([1.0, 2.0]), 0.9, &MdpAsLpOptions::default())
             .expect("LP should solve to optimality");
         // V = r / (1 − γ) = [1, 2] / 0.1 = [10, 20].
@@ -415,7 +417,8 @@ mod tests {
 
     #[test]
     fn rolling_horizon_runs_expected_chunks() {
-        std::env::set_var("LP_SOLVER", "internal");
+        let _lock = ENV_LOCK.lock().expect("lock LP solver environment");
+        let _solver = EnvVarGuard::set("LP_SOLVER", "internal");
         let opts = LpSolverOptions::default();
         // State = remaining budget; LP each chunk is `max x s.t. x ≤ state`.
         let log = lp_rolling_horizon(

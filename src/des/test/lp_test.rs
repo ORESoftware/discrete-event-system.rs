@@ -16,6 +16,7 @@ mod tests {
     };
     use crate::des::general::lp_des::{solve_lp_via_des, DESSimplexOptions, PivotRule};
     use crate::des::general::value_iteration::{value_iteration, MDPSpec, Outcome, VIOptions};
+    use crate::des::shared::test_support::{EnvVarGuard, ENV_LOCK};
 
     fn approx(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol * 1.0_f64.max(a.abs()).max(b.abs())
@@ -145,11 +146,12 @@ mod tests {
         let external = solve_lp_external(
             &lp,
             &ExternalSolverOptions {
-                method: Some("highs".to_string()),
+                method: Some("simplex".to_string()),
                 ..Default::default()
             },
         );
         assert_eq!(external.status, LPStatus::Optimal, "{:?}", external.message);
+        assert_eq!(external.solver, "rust:lp-fallback-for-scipy:simplex");
         assert!(approx(external.objective, internal.objective, 1e-9));
         assert!(max_abs(&external.x, &internal.x) < 1e-9);
     }
@@ -394,7 +396,8 @@ mod tests {
     #[test]
     fn solve_mdp_as_lp_matches_value_iteration() {
         // Force the in-process simplex so the test needs no python/scipy.
-        std::env::set_var("LP_SOLVER", "internal");
+        let _lock = ENV_LOCK.lock().expect("lock LP solver environment");
+        let _solver = EnvVarGuard::set("LP_SOLVER", "internal");
         let vi = value_iteration(
             mdp_4state_line(),
             VIOptions {

@@ -5,12 +5,22 @@
   "scripts": {
     "test:html": "npm run test:playwright && npm run test:puppeteer",
     "test:playwright": "node tests/playwright-html-pages.mjs",
-    "test:puppeteer": "node tests/puppeteer-html-pages.mjs"
+    "test:puppeteer": "node tests/puppeteer-html-pages.mjs",
+    "lint:ores": "if [ -f .ores-lint/lint.sh ]; then sh .ores-lint/lint.sh; else echo 'ores-lint not installed'; fi",
+    "prepublishOnly": "npm run lint:ores"
   },
   "devDependencies": {
     "playwright-core": "^1.53.0",
     "puppeteer-core": "^24.10.2",
     "valibot": "^1.4.1",
     "zod": "^4.4.3"
+  },
+  "oresLint": {
+    "note": "Declared, not installed. ores-lint resolves these from a global install - see .ores-lint/README.md",
+    "requires": {
+      "eslint": ">=9",
+      "typescript-eslint": ">=8 (optional; without it .ts files are skipped)"
+    },
+    "install": "npm i -g eslint typescript-eslint"
   }
 }
